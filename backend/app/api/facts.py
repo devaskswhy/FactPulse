@@ -30,9 +30,20 @@ from app.services.render import PageRenderError, page_dimensions, scale_bbox
 router = APIRouter(tags=["facts"])
 
 
-@router.get("/facts", response_model=FactList, summary="List extracted facts")
+@router.get(
+    "/facts",
+    response_model=FactList,
+    summary="Facts across the knowledge layer, or scoped to one document",
+)
 def list_facts(
-    document_id: int | None = Query(None, description="Restrict to one document."),
+    document_id: int | None = Query(
+        None,
+        description=(
+            "Scope to one document. Omit for the cross-document view -- the "
+            "default, since the point of the layer is that facts from "
+            "different sources sit together."
+        ),
+    ),
     fact_type: str | None = Query(
         None,
         description=(
@@ -54,9 +65,21 @@ def list_facts(
         "subject": subject,
         "min_confidence": min_confidence,
     }
+    facts = repo.list_facts(conn, limit=limit, offset=offset, **filters)
+
+    # Resolve each represented document once, so a cross-document list can name
+    # every fact's source without a query per row.
+    titles: dict[str, str] = {}
+    for doc_id in {f.document_id for f in facts}:
+        document = repo.get_document(conn, doc_id)
+        if document is not None:
+            titles[str(doc_id)] = document.title or document.filename
+
     return FactList(
         total=repo.count_facts(conn, **filters),
-        facts=repo.list_facts(conn, limit=limit, offset=offset, **filters),
+        scope="document" if document_id is not None else "knowledge-layer",
+        documents=titles,
+        facts=facts,
     )
 
 

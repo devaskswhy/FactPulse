@@ -56,7 +56,7 @@ The schema is applied automatically on startup; `init_db()` is idempotent.
 | | |
 | --- | --- |
 | `POST /documents` | Upload a PDF: parse, chunk, store. Deduped by SHA-256 |
-| `GET /documents` | List documents |
+| `GET /documents` | Workspace view: every document with fact/relationship counts |
 | `GET /documents/{id}` | One document, with chunk count |
 | `GET /documents/{id}/chunks` | Its chunks, with page ranges |
 | `GET /documents/{id}/file` | The stored original PDF |
@@ -199,3 +199,28 @@ curl -X POST http://127.0.0.1:8000/review-queue/40/resolve   -H 'Content-Type: a
 `rejected` deletes the fact; `edited` writes corrections back. Grounding fields
 (quote, page, bbox) are **not** editable — a fact whose quote is wrong should be
 rejected, not patched into claiming evidence the PDF does not support.
+
+### Incremental multi-document ingestion
+
+The layer accumulates. Adding a document never re-processes what is already
+there: only the new file is parsed, chunked and extracted, only its facts are
+embedded, and only its facts act as the "A" side of a comparison. Existing
+facts are read to form the candidate pool, and their relationship lists grow --
+but they are never rewritten.
+
+```bash
+python scripts/bulk_ingest.py ../samples/starter-datasets/india-macroeconomy --pages 1-12
+python scripts/bulk_ingest.py <folder> --dry-run     # chunk counts, no API calls
+```
+
+`bulk_ingest.py` calls the same `ingest_pdf()` the API route uses, so it
+exercises the real path. Measured on the three India-macro excerpts:
+
+| # | Document | Pool before | Facts added | Embeddings added |
+| --- | --- | --- | --- | --- |
+| 1 | Economic Survey | 0 | +42 | +42 |
+| 2 | RBI Annual Report | 42 | +102 | +102 |
+| 3 | IMF Article IV | 144 | +86 | +86 |
+
+Embeddings added always equals that document's own fact count — earlier
+documents are read, never re-embedded.

@@ -91,6 +91,21 @@ class FactType(BaseModel):
 
 class FactList(BaseModel):
     total: int = Field(..., ge=0, description="Facts matching the filter, before paging.")
+    scope: str = Field(
+        "knowledge-layer",
+        description=(
+            "'knowledge-layer' when returning facts across every document "
+            "(the default), or 'document' when filtered to one."
+        ),
+    )
+    documents: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "document_id -> title, for the documents represented in `facts`. "
+            "Lets a cross-document list show each fact's source without a "
+            "lookup per row."
+        ),
+    )
     facts: list[Fact] = Field(default_factory=list)
 
 

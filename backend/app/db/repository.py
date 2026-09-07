@@ -748,3 +748,69 @@ def find_relationship_for_fact(
         """,
         {"fid": fact_id},
     ).fetchone()
+
+
+# ------------------------------------------------------- workspace / rollups
+
+
+def list_documents_with_counts(
+    conn: sqlite3.Connection, limit: int = 50, offset: int = 0
+) -> list[sqlite3.Row]:
+    """Every document with its fact, relationship and open-review counts.
+
+    One query with correlated subqueries rather than a per-document rollup:
+    the workspace view is the first thing loaded and must not cost N queries.
+
+    A relationship is counted for a document when EITHER end of the pair is one
+    of its facts, so a relationship spanning two documents shows on both -- that
+    is the point of the view. Summing the column therefore double-counts
+    cross-document links, which is why the response also carries a corpus-wide
+    total taken from the relationships table directly.
+    """
+    return conn.execute(
+        """
+        SELECT
+            d.*,
+            (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id)
+                AS chunk_count,
+            (SELECT COUNT(*) FROM facts f WHERE f.document_id = d.id)
+                AS fact_count,
+            (SELECT COUNT(*) FROM embeddings e
+               JOIN facts f2 ON f2.id = e.fact_id
+              WHERE f2.document_id = d.id)
+                AS embedded_count,
+            (SELECT COUNT(*) FROM relationships r
+              WHERE r.fact_id_a IN (SELECT id FROM facts WHERE document_id = d.id)
+                 OR r.fact_id_b IN (SELECT id FROM facts WHERE document_id = d.id))
+                AS relationship_count,
+            (SELECT COUNT(*) FROM review_queue q
+               LEFT JOIN facts f3 ON f3.id = q.fact_id
+               LEFT JOIN chunks c3 ON c3.id = q.chunk_id
+              WHERE q.resolved = 0
+                AND COALESCE(f3.document_id, c3.document_id) = d.id)
+                AS open_review_count
+        FROM documents d
+        ORDER BY d.uploaded_at DESC, d.id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (limit, offset),
+    ).fetchall()
+
+
+def knowledge_layer_totals(conn: sqlite3.Connection) -> dict[str, int]:
+    """Corpus-wide counts for the workspace header."""
+    one = lambda sql: conn.execute(sql).fetchone()[0]
+    return {
+        "documents": one("SELECT COUNT(*) FROM documents"),
+        "facts": one("SELECT COUNT(*) FROM facts"),
+        "fact_types": one("SELECT COUNT(*) FROM fact_types"),
+        "embeddings": one("SELECT COUNT(*) FROM embeddings"),
+        "relationships": one("SELECT COUNT(*) FROM relationships"),
+        "cross_document_relationships": one(
+            "SELECT COUNT(*) FROM relationships r "
+            "JOIN facts a ON a.id = r.fact_id_a "
+            "JOIN facts b ON b.id = r.fact_id_b "
+            "WHERE a.document_id != b.document_id"
+        ),
+        "open_review_items": one("SELECT COUNT(*) FROM review_queue WHERE resolved = 0"),
+    }

@@ -41,6 +41,7 @@ from app.services.extract import (
     QuotaExhaustedError,
     _is_daily_quota,
     _is_retryable,
+    _retry_delay,
     build_client,
 )
 
@@ -76,6 +77,7 @@ class LinkingSummary:
     facts_compared: int = 0
     pairs_evaluated: int = 0
     relationships_created: int = 0
+    pool_size: int = 0  # existing facts compared against, loaded once
     by_type: dict[str, int] = field(default_factory=dict)
     errors: int = 0
 
@@ -86,6 +88,7 @@ class LinkingSummary:
             "facts_compared": self.facts_compared,
             "pairs_evaluated": self.pairs_evaluated,
             "relationships_created": self.relationships_created,
+            "pool_size": self.pool_size,
             "by_type": dict(sorted(self.by_type.items())),
             "errors": self.errors,
         }
@@ -112,62 +115,108 @@ def embed_document_facts(
 # ------------------------------------------------------------------ retrieval
 
 
-def find_candidates(
-    conn: sqlite3.Connection,
-    fact_id: int,
-    document_id: int,
-    query_vector: np.ndarray,
-    *,
-    threshold: float = SIMILARITY_THRESHOLD,
-    top_k: int = TOP_K,
-) -> list[tuple[int, float]]:
-    """Top-k most similar facts from other documents, above `threshold`.
+@dataclass
+class CandidatePool:
+    """The existing knowledge layer, loaded once as a matrix.
 
-    Brute force: every candidate embedding is loaded into one numpy matrix and
-    scored with a single vectorized dot product. That is O(n) per new fact in
-    both time and memory.
-
-    This is deliberate and appropriate at the hundreds-to-low-thousands scale
-    this system targets -- at 1k facts by 768 float32 dims the whole matrix is
-    ~3 MB and the multiply is sub-millisecond, so an index would add operational
-    weight for no measurable gain. It stops being appropriate somewhere in the
-    high tens of thousands, when the load-everything-per-fact pattern starts to
-    dominate. FAISS (in-process), pgvector (if the store moves to Postgres), or
-    Qdrant (standalone) are the natural upgrade paths; `embeddings` is the only
-    table that would need to change, and this function is the only caller.
+    Built from every embedded fact OUTSIDE the document being ingested. Facts
+    already in the layer are read here and never rewritten -- ingesting a new
+    document does not re-embed, re-extract, or re-classify anything that was
+    already stored.
     """
-    rows = repo.load_candidate_embeddings(conn, exclude_document_id=document_id)
-    if not rows:
-        return []
 
-    ids: list[int] = []
+    fact_ids: list[int]
+    matrix: np.ndarray  # shape (n_facts, dim), rows already L2-normalised
+
+    @property
+    def size(self) -> int:
+        return len(self.fact_ids)
+
+    @property
+    def dim(self) -> int:
+        return int(self.matrix.shape[1]) if self.matrix.size else 0
+
+
+def load_candidate_pool(
+    conn: sqlite3.Connection, exclude_document_id: int, expected_dim: int | None = None
+) -> CandidatePool:
+    """Read every other document's embeddings into one matrix.
+
+    Loaded ONCE per ingested document, not once per new fact. That distinction
+    matters: this reads and unpacks the whole corpus, so calling it inside the
+    per-fact loop made ingestion cost O(new_facts x existing_facts) BLOB
+    unpacks -- quadratic in the size of the knowledge layer, and the single
+    worst scaling property the pipeline had. Hoisting it out makes each
+    document's linking cost one corpus read plus one matrix multiply per new
+    fact.
+
+    The pool is a snapshot: the facts it holds belong to already-ingested
+    documents and cannot change while this document is being linked.
+    """
+    rows = repo.load_candidate_embeddings(conn, exclude_document_id=exclude_document_id)
+    if not rows:
+        return CandidatePool(fact_ids=[], matrix=np.zeros((0, 0), dtype=np.float32))
+
+    fact_ids: list[int] = []
     vectors: list[np.ndarray] = []
     for row in rows:
         try:
             vector = unpack_vector(row["vector"], row["dim"])
         except EmbeddingError as exc:
-            # A vector written at a different width than the current model
-            # produces. Skip it rather than failing the whole comparison.
+            # Written at a width the current model no longer produces. Skip it
+            # rather than failing the whole comparison.
             logger.warning("skipping fact %s: %s", row["fact_id"], exc)
             continue
-        if vector.size != query_vector.size:
+        if expected_dim is not None and vector.size != expected_dim:
             logger.warning(
-                "skipping fact %s: dim %d != query dim %d",
-                row["fact_id"], vector.size, query_vector.size,
+                "skipping fact %s: dim %d != expected %d",
+                row["fact_id"], vector.size, expected_dim,
             )
             continue
-        ids.append(row["fact_id"])
+        fact_ids.append(row["fact_id"])
         vectors.append(vector)
 
     if not vectors:
+        return CandidatePool(fact_ids=[], matrix=np.zeros((0, 0), dtype=np.float32))
+
+    return CandidatePool(fact_ids=fact_ids, matrix=np.vstack(vectors))
+
+
+def find_candidates(
+    pool: CandidatePool,
+    query_vector: np.ndarray,
+    *,
+    threshold: float = SIMILARITY_THRESHOLD,
+    top_k: int = TOP_K,
+) -> list[tuple[int, float]]:
+    """Top-k facts in the pool most similar to `query_vector`, above `threshold`.
+
+    Brute force: one vectorized dot product against the whole pool, O(n) per
+    new fact in time and O(n) memory for the pool held once.
+
+    Deliberate and appropriate at the hundreds-to-low-thousands scale this
+    system targets -- at 1k facts by 768 float32 dims the pool is ~3 MB and the
+    multiply is sub-millisecond, so an index would add operational weight for no
+    measurable gain. It stops being appropriate somewhere in the high tens of
+    thousands. FAISS (in-process), pgvector (if the store moves to Postgres), or
+    Qdrant (standalone) are the natural upgrade paths; `embeddings` is the only
+    table that would change, and this function plus load_candidate_pool are the
+    only callers.
+    """
+    if pool.size == 0 or query_vector.size == 0:
+        return []
+    if pool.dim != query_vector.size:
+        logger.warning(
+            "pool dim %d != query dim %d; no candidates", pool.dim, query_vector.size
+        )
         return []
 
-    matrix = np.vstack(vectors)
-    scores = cosine_against_matrix(query_vector, matrix)
-
+    scores = cosine_against_matrix(query_vector, pool.matrix)
     order = np.argsort(-scores)[:top_k]
     return [
-        (ids[i], float(scores[i])) for i in order if float(scores[i]) >= threshold
+        (pool.fact_ids[i], float(scores[i]))
+        for i in order
+        if float(scores[i]) >= threshold
     ]
 
 
@@ -375,7 +424,7 @@ def classify_candidates(
                 ) from exc
             if attempt == attempts - 1 or not _is_retryable(exc):
                 raise ExtractionError(f"classification failed: {exc}") from exc
-            delay = min(2.0 * (2**attempt), 30.0) + random.uniform(0, 1.0)
+            delay = _retry_delay(exc, attempt)
             logger.warning("retryable classifier error, sleeping %.1fs", delay)
             time.sleep(delay)
 
@@ -441,13 +490,29 @@ def link_document_facts(
     summary.facts_embedded = embed_document_facts(conn, document_id, client=client)
 
     facts = repo.list_facts(conn, document_id=document_id, limit=10_000)
+
+    # Load the existing knowledge layer ONCE, not once per new fact. These rows
+    # belong to already-ingested documents and are only ever read here.
+    pool = load_candidate_pool(
+        conn, exclude_document_id=document_id, expected_dim=settings.embedding_dim
+    )
+    summary.pool_size = pool.size
+    logger.info(
+        "linking document %s: %d new fact(s) against a pool of %d existing fact(s)",
+        document_id, len(facts), pool.size,
+    )
+    if pool.size == 0:
+        # First document in the layer: nothing to compare against, and no
+        # reason to walk its facts at all.
+        return summary
+
     for fact in facts:
         stored = repo.get_embedding(conn, fact.id)
         if stored is None:
             continue
         query = unpack_vector(stored[0], stored[1])
 
-        scored = find_candidates(conn, fact.id, document_id, query)
+        scored = find_candidates(pool, query)
         # Drop pairs already judged on an earlier run, so a re-run costs
         # nothing for work already done.
         scored = [

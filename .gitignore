@@ -12,6 +12,11 @@ factpulse.db-wal
 *.sqlite3
 
 # ---- uploaded / derived artifacts ---------------------------------------
+# Source documents: large, and not ours to redistribute from a public repo.
+# The folder structure and its READMEs are kept so the layout is documented.
+samples/**/*.pdf
+!samples/**/README.md
+
 backend/uploads/
 backend/page_cache/
 backend/storage/

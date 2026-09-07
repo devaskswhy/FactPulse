@@ -105,6 +105,14 @@ class LinkingSummaryOut(BaseModel):
         ..., ge=0, description="Candidate pairs sent to the classifier."
     )
     relationships_created: int = Field(..., ge=0)
+    pool_size: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Existing facts from other documents this run compared against. "
+            "Loaded once per document, never rewritten."
+        ),
+    )
     by_type: dict[str, int] = Field(
         default_factory=dict,
         description="Verdict counts including unrelated, which is not stored.",

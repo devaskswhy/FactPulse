@@ -51,9 +51,44 @@ class DocumentDetail(Document):
     chunk_count: int = Field(0, ge=0, description="Number of chunks stored for this document.")
 
 
+class DocumentSummary(Document):
+    """A document plus what it contributed to the knowledge layer."""
+
+    chunk_count: int = Field(0, ge=0)
+    fact_count: int = Field(0, ge=0)
+    embedded_count: int = Field(
+        0, ge=0, description="Facts of this document that have an embedding."
+    )
+    relationship_count: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Relationships touching this document's facts, counting either end. "
+            "A cross-document link appears on both documents, so these do not "
+            "sum to the corpus total."
+        ),
+    )
+    open_review_count: int = Field(0, ge=0)
+
+
+class KnowledgeLayerTotals(BaseModel):
+    """Corpus-wide rollup: the knowledge layer as a whole."""
+
+    documents: int = Field(..., ge=0)
+    facts: int = Field(..., ge=0)
+    fact_types: int = Field(..., ge=0)
+    embeddings: int = Field(..., ge=0)
+    relationships: int = Field(..., ge=0)
+    cross_document_relationships: int = Field(
+        ..., ge=0, description="Relationships whose two facts come from different documents."
+    )
+    open_review_items: int = Field(..., ge=0)
+
+
 class DocumentList(BaseModel):
     total: int = Field(..., ge=0, description="Total documents stored.")
-    documents: list[Document] = Field(default_factory=list)
+    totals: KnowledgeLayerTotals
+    documents: list[DocumentSummary] = Field(default_factory=list)
 
 
 class DocumentUploadResponse(BaseModel):

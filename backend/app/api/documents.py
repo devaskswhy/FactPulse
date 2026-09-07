@@ -14,7 +14,9 @@ from app.schemas.document import (
     ChunkList,
     DocumentDetail,
     DocumentList,
+    DocumentSummary,
     DocumentUploadResponse,
+    KnowledgeLayerTotals,
     RechunkResponse,
 )
 from app.schemas.fact import ExtractionSummaryOut
@@ -96,15 +98,44 @@ async def upload_document(
     )
 
 
-@router.get("", response_model=DocumentList, summary="List ingested documents")
+@router.get(
+    "",
+    response_model=DocumentList,
+    summary="The workspace: every document in the knowledge layer",
+)
 def list_documents(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(db_dependency),
 ) -> DocumentList:
+    """Every source in the layer, with what each contributed.
+
+    `totals` is the corpus-wide rollup. Per-document `relationship_count`
+    counts either end of a pair, so a cross-document link appears on both
+    documents and the column deliberately does not sum to
+    `totals.relationships`.
+    """
+    rows = repo.list_documents_with_counts(conn, limit=limit, offset=offset)
     return DocumentList(
         total=repo.count_documents(conn),
-        documents=repo.list_documents(conn, limit=limit, offset=offset),
+        totals=KnowledgeLayerTotals(**repo.knowledge_layer_totals(conn)),
+        documents=[
+            DocumentSummary(
+                id=r["id"],
+                filename=r["filename"],
+                title=r["title"],
+                sha256=r["sha256"],
+                uploaded_at=r["uploaded_at"],
+                page_count=r["page_count"],
+                status=r["status"],
+                chunk_count=r["chunk_count"],
+                fact_count=r["fact_count"],
+                embedded_count=r["embedded_count"],
+                relationship_count=r["relationship_count"],
+                open_review_count=r["open_review_count"],
+            )
+            for r in rows
+        ],
     )
 
 

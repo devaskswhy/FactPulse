@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -59,6 +60,25 @@ def _is_retryable(exc: Exception) -> bool:
 
 def _is_daily_quota(exc: Exception) -> bool:
     return any(marker in str(exc) for marker in _NON_RETRYABLE_QUOTA_MARKERS)
+
+
+# Gemini tells us how long to wait ("retryDelay": "59s"). Honour it: a
+# per-minute cap needs ~60s, and exponential backoff capped at 30s never waits
+# long enough, so every attempt is spent before the window reopens.
+_RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s")
+
+# Ceiling on an honoured hint. Long enough for a per-minute window, short
+# enough that a pathological value cannot stall a run indefinitely.
+MAX_RETRY_DELAY_SECONDS = 70.0
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    """Seconds to wait: the server's own hint when it gives one, else backoff."""
+    match = _RETRY_DELAY_RE.search(str(exc))
+    if match:
+        hinted = float(match.group(1)) + 1.0  # clear the boundary
+        return min(hinted, MAX_RETRY_DELAY_SECONDS)
+    return min(2.0 * (2**attempt), 30.0) + random.uniform(0, 1.0)
 
 
 @dataclass
@@ -293,7 +313,7 @@ def extract_facts_from_chunk(
                 ) from exc
             if attempt == attempts - 1 or not _is_retryable(exc):
                 raise ExtractionError(f"Gemini call failed: {exc}") from exc
-            delay = min(2.0 * (2**attempt), 30.0) + random.uniform(0, 1.0)
+            delay = _retry_delay(exc, attempt)
             logger.warning(
                 "retryable Gemini error (attempt %d/%d), sleeping %.1fs: %s",
                 attempt + 1, attempts, delay, str(exc)[:120],

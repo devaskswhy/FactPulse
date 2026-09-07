@@ -596,7 +596,74 @@ borderline label is the more specific signal. Lowering
 
 ---
 
-## 8. Configuration
+## 8. Incremental multi-document ingestion
+
+The layer is meant to accumulate. Adding the Nth document must cost what
+adding the first did, plus one comparison pass against what is already there --
+never a reprocessing of it.
+
+### What a new document touches
+
+| Step | Scope |
+| --- | --- |
+| parse / chunk | the new file only |
+| extract | the new document's chunks only |
+| embed | the new document's facts, and only those without a vector |
+| link | the new facts as the "A" side; existing facts are **read**, never rewritten |
+| self-check | the new document's facts only |
+
+Existing facts gain relationships -- their `relationships` list grows to
+include the new matches -- but no existing fact is re-extracted, re-embedded,
+or re-classified as the subject of a comparison.
+
+### The one place this was wrong
+
+`find_candidates()` originally took a connection and loaded every embedding in
+the corpus itself. It is called once per new fact, so ingesting a document with
+200 facts against a pool of 1000 meant 200 full corpus reads and 200,000 BLOB
+unpacks -- O(new x existing), quadratic in the size of the knowledge layer and
+the worst scaling property the pipeline had.
+
+The pool is now loaded once per document by `load_candidate_pool()` and passed
+in. Measured on a 55-fact document: **1 corpus load instead of 55**, 0.3 ms to
+build the pool and 0.01 ms per similarity search. The pool is a snapshot, which
+is sound because the facts in it belong to already-ingested documents and
+cannot change while this document is being linked.
+
+Nothing else needed fixing. `resync_fact_types()` does scan all facts, but it
+runs only on a `replace=true` re-extraction or a document delete, never on a
+normal ingest.
+
+### bulk_ingest.py
+
+`backend/scripts/bulk_ingest.py` ingests a folder one file at a time through
+`ingest_pdf()` -- the same function the API route calls, not a parallel
+implementation. The HTTP layer only reads the upload and maps exceptions to
+status codes; everything below is shared.
+
+```
+python scripts/bulk_ingest.py ../samples/starter-datasets/india-macroeconomy --pages 1-12
+python scripts/bulk_ingest.py <folder> --dry-run     # chunk counts, no calls
+```
+
+`--pages` crops each PDF before ingesting, producing a genuinely smaller
+document so page counts and bounding boxes stay consistent with what was
+stored. It carries the source metadata across, since `insert_pdf` copies pages
+but not document metadata.
+
+### Document titles
+
+`_infer_title()` returns the PDF's metadata title or nothing. Guessing from
+body text was implemented and then removed: these documents are excerpts, so
+page one is typically a contents page or a running header, and every heuristic
+tried still produced labels like "Page No.", "BSE Limited" and
+"Phiroze Jeejeebhoy Towers,". A wrong title is worse than none because it looks
+authoritative. The filename is always returned alongside and is the honest
+fallback.
+
+---
+
+## 9. Configuration
 
 `backend/.env` (see `backend/.env.example`; `.env` is gitignored):
 
@@ -617,7 +684,7 @@ throughout).
 
 ---
 
-## 9. Current status
+## 10. Current status
 
 All eight pipeline steps are implemented: ingest, parse, chunk, extract,
 ground, embed, link, review.

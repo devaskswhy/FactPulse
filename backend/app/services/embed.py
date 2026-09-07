@@ -16,13 +16,20 @@ and the retrieval step stays a single matrix multiply.
 from __future__ import annotations
 
 import logging
+import time
 
 import numpy as np
 from google import genai
 from google.genai import types
 
 from app.core.config import settings
-from app.services.extract import ExtractionError, build_client
+from app.services.extract import (
+    ExtractionError,
+    _is_daily_quota,
+    _is_retryable,
+    _retry_delay,
+    build_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,15 +88,40 @@ def embed_texts(
     vectors: list[np.ndarray] = []
     for start in range(0, len(texts), EMBED_BATCH_SIZE):
         batch = texts[start : start + EMBED_BATCH_SIZE]
-        try:
-            response = client.models.embed_content(
-                model=settings.gemini_embedding_model,
-                contents=batch,
-                config=config,
-            )
-        except Exception as exc:
-            raise EmbeddingError(f"embedding call failed: {exc}") from exc
 
+        # Retry transient limits, exactly as the generate calls do. Embedding
+        # had no retry at first, and a *per-minute* cap (100 embeds/min on the
+        # free tier) permanently left a whole document's facts unembedded and
+        # therefore unlinkable -- a minute's wait turned into a missing document
+        # in the knowledge layer. A per-day quota is still not retried; nothing
+        # we would wait through clears it.
+        attempts = max(1, settings.extraction_max_attempts)
+        response = None
+        for attempt in range(attempts):
+            try:
+                response = client.models.embed_content(
+                    model=settings.gemini_embedding_model,
+                    contents=batch,
+                    config=config,
+                )
+                break
+            except Exception as exc:
+                if _is_daily_quota(exc):
+                    raise EmbeddingError(
+                        f"daily embedding quota exhausted for "
+                        f"{settings.gemini_embedding_model}: {exc}"
+                    ) from exc
+                if attempt == attempts - 1 or not _is_retryable(exc):
+                    raise EmbeddingError(f"embedding call failed: {exc}") from exc
+                delay = _retry_delay(exc, attempt)
+                logger.warning(
+                    "retryable embedding error (attempt %d/%d), sleeping %.1fs",
+                    attempt + 1, attempts, delay,
+                )
+                time.sleep(delay)
+
+        if response is None:  # pragma: no cover - loop breaks or raises
+            raise EmbeddingError("embedding call produced no response")
         returned = response.embeddings or []
         if len(returned) != len(batch):
             raise EmbeddingError(

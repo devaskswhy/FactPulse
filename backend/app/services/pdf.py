@@ -81,7 +81,7 @@ def clean_text(raw: str) -> str:
 
 
 def _infer_title(doc: fitz.Document, pages: list[ParsedPage]) -> str | None:
-    """PDF metadata title if it is meaningful, else the first substantial line."""
+    """The PDF's metadata title, if it has a usable one. Otherwise None."""
     meta_title = (doc.metadata or {}).get("title") or ""
     meta_title = meta_title.strip()
     # Producers often leave junk here: a temp filename, or the path it was
@@ -89,11 +89,22 @@ def _infer_title(doc: fitz.Document, pages: list[ParsedPage]) -> str | None:
     if meta_title and not re.fullmatch(r".*\.(pdf|docx?|pptx?|indd)", meta_title, re.I):
         return meta_title[:300]
 
-    if pages:
-        for line in pages[0].text.split("\n"):
-            line = line.strip()
-            if len(line) >= 8:
-                return line[:300]
+    # No title in the metadata: return nothing, and let the caller fall back to
+    # the filename.
+    #
+    # Guessing from the body text was tried and removed. These documents are
+    # *excerpts*, so page one is usually mid-report -- a contents page, an
+    # acknowledgement, a running header, a stock-exchange address. Every
+    # heuristic tried (skip known section headings, skip contents-page dot
+    # leaders, require two words and twelve characters) still produced labels
+    # like "Page No.", "BSE Limited", "List of Tables" and
+    # "Phiroze Jeejeebhoy Towers,". Those are worse than no title at all,
+    # because they look authoritative while being wrong, and they are what a
+    # reader would see in the workspace list.
+    #
+    # The filename is always present in the API response, is chosen by whoever
+    # supplied the document, and is a more honest label than a guess. So a
+    # missing title is a correct answer here, not a gap to paper over.
     return None
 
 

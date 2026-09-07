@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.6-flash"
     gemini_embedding_model: str = "text-embedding-004"
     embedding_dim: int = 768
 
@@ -34,7 +34,12 @@ class Settings(BaseSettings):
 
     # extraction
     extract_on_upload: bool = True
-    review_confidence_threshold: float = 0.5
+    extraction_max_attempts: int = 4
+    # Calibrated against gemini-3.6-flash, whose confidence floor on hedged
+    # prose sits near 0.70 -- a 0.5 threshold never fires and so never
+    # surfaces anything. 0.9 catches facts the model expressed a real
+    # reservation about while leaving directly-stated ones alone.
+    review_confidence_threshold: float = 0.9
 
     # chunking
     chunk_max_tokens: int = 900

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import logging
+import random
+import time
 from dataclasses import dataclass, field
 
 from google import genai
@@ -28,9 +30,19 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Transient server-side conditions: overload, rate limiting, and generic 5xx.
+# These are worth retrying; a 400 or a 404 is not, and retrying one only wastes
+# quota and delays the real error.
+_RETRYABLE_MARKERS = ("503", "429", "500", "502", "504", "UNAVAILABLE", "RESOURCE_EXHAUSTED")
+
 
 class ExtractionError(RuntimeError):
     """The model call failed or returned something unusable."""
+
+
+def _is_retryable(exc: Exception) -> bool:
+    text = str(exc)
+    return any(marker in text for marker in _RETRYABLE_MARKERS)
 
 
 @dataclass
@@ -237,19 +249,38 @@ def extract_facts_from_chunk(
 
     client = client or build_client()
 
-    try:
-        response = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=USER_TEMPLATE.format(chunk_text=chunk_text),
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_schema=response_schema(),
-                temperature=0.1,
-            ),
-        )
-    except Exception as exc:
-        raise ExtractionError(f"Gemini call failed: {exc}") from exc
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION,
+        response_mime_type="application/json",
+        response_schema=response_schema(),
+        temperature=0.1,
+    )
+
+    # Retry transient overload/rate-limit responses with exponential backoff and
+    # jitter. Without this a momentary 503 permanently costs the chunk its
+    # facts, which showed up immediately in practice.
+    attempts = max(1, settings.extraction_max_attempts)
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            response = client.models.generate_content(
+                model=settings.gemini_model,
+                contents=USER_TEMPLATE.format(chunk_text=chunk_text),
+                config=config,
+            )
+            break
+        except Exception as exc:
+            last = exc
+            if attempt == attempts - 1 or not _is_retryable(exc):
+                raise ExtractionError(f"Gemini call failed: {exc}") from exc
+            delay = min(2.0 * (2**attempt), 30.0) + random.uniform(0, 1.0)
+            logger.warning(
+                "retryable Gemini error (attempt %d/%d), sleeping %.1fs: %s",
+                attempt + 1, attempts, delay, str(exc)[:120],
+            )
+            time.sleep(delay)
+    else:  # pragma: no cover - loop always breaks or raises
+        raise ExtractionError(f"Gemini call failed: {last}")
 
     payload = getattr(response, "text", None)
     if not payload:

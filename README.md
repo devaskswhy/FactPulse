@@ -97,7 +97,7 @@ plus the page and bounding box where that quote sits in the PDF.
 ### Nothing doubtful is thrown away
 
 A fact whose quote cannot be verified, or whose confidence falls below
-`REVIEW_CONFIDENCE_THRESHOLD` (default 0.5), is **still stored** — and also
+`REVIEW_CONFIDENCE_THRESHOLD` (default 0.9), is **still stored** — and also
 gets a `review_queue` row pointing at it:
 
 ```bash

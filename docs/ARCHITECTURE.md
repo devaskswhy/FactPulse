@@ -328,7 +328,7 @@ the database — which is the whole reason the review queue exists.
 | --- | --- |
 | `unverified_quote` | Quote is not a substring of the source chunk. The fact is not grounded in the document. |
 | `ungrounded_quote` | Quote verified against the chunk but could not be located in the PDF, so it has no bounding box. |
-| `low_confidence` | Model's own confidence is below `REVIEW_CONFIDENCE_THRESHOLD` (default 0.5). |
+| `low_confidence` | Model's own confidence is below `REVIEW_CONFIDENCE_THRESHOLD` (default 0.9). |
 | `extraction_failed` | The model call failed for a chunk. Recorded against the chunk, so the gap in coverage is visible. |
 
 Both can apply to one fact, producing two rows.
@@ -336,6 +336,29 @@ Both can apply to one fact, producing two rows.
 The single exception is a fact returned with no type, no statement, or no quote
 at all. There is nothing to store and nothing to review, so it is dropped in
 `extract.py` — with a log line, not in silence.
+
+### Calibrating the confidence threshold
+
+The threshold is model-specific and has to be set against observed behaviour,
+not guessed. Measured over the sample corpus, `gemini-3.6-flash` reports 1.0
+for directly-stated facts and bottoms out near 0.70 for hedged prose
+("preliminary figures suggest", "it is understood that"). It does not use the
+low end of the scale at all.
+
+A threshold of 0.5 therefore never fires, and a rule that never fires surfaces
+nothing. The default is 0.9, which catches facts the model expressed a real
+reservation about while leaving directly-stated ones alone. Re-tune it when the
+model changes.
+
+### Transient failures are retried
+
+Model overload (503) and rate limiting (429) are retried with exponential
+backoff and jitter, up to `EXTRACTION_MAX_ATTEMPTS`. Client errors such as 400
+and 404 are not retried -- they will not succeed on a second attempt, and
+retrying only wastes quota and delays the real error.
+
+Without this, a momentary 503 permanently cost a chunk its facts, which
+happened on the first real run.
 
 ### Failure isolation
 

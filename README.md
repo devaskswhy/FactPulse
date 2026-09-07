@@ -7,18 +7,11 @@ context — time period, scope, or units.
 
 > Two documents say revenue was $4.2M and $5.1M. The useful answer is rarely
 > "contradiction" — it is usually "different fiscal period" or "one is a
-> segment, one is consolidated". FactPulse is built to tell those apart, and
-> to show you the page and rectangle each claim came from.
+> segment, one is consolidated". FactPulse is built to tell those apart, and to
+> show you the page and rectangle each claim came from.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data model and the
-reasoning behind it, [docs/DEMO_CASES.md](docs/DEMO_CASES.md) for the four
-worked cases with fact IDs, and [docs/FAILURE_CASE.md](docs/FAILURE_CASE.md)
-for a write-up of what the system got wrong and why.
-
-## The four cases
-
-All reproducible in the running app against the committed corpus, none
-hardcoded anywhere in the pipeline:
+All four required cases are reproducible in the running app against the
+committed corpus, and none of them is hardcoded anywhere in the pipeline:
 
 | Case | Example |
 | --- | --- |
@@ -27,255 +20,400 @@ hardcoded anywhere in the pipeline:
 | **Reconciled** | RBI's *actual* 3.3% global growth for 2024 vs the Survey's IMF *projection* of 3.2% for the same year — reconciled by definition, not by period |
 | **Failure** | A waste-intensity figure of 23.3 extracted correctly with no unit, because the table never states one. Caught by the self-check, not discarded |
 
-## Status
+Exact fact IDs are in [docs/DEMO_CASES.md](docs/DEMO_CASES.md).
 
-All eight pipeline steps are implemented: ingest, parse, chunk, extract,
-ground, embed, link, review. The frontend is still a scaffold.
+---
 
-Extraction needs `GEMINI_API_KEY`. Without it the backend still runs and still
-ingests documents; they simply stop at `chunked` and `POST /extract` answers
-503.
+## Setup and Run Instructions
 
-## Stack
+**Requirements:** Python 3.11+, Node 18+, and a free Gemini API key.
 
-| | |
-| --- | --- |
-| Backend | Python 3.11, FastAPI, Uvicorn, SQLite, PyMuPDF, google-genai, numpy |
-| Frontend | Next.js (App Router), TypeScript, Tailwind CSS |
-| Database | SQLite, schema in [`backend/app/db/schema.sql`](backend/app/db/schema.sql) |
+### 1. Get a free Gemini API key
 
-## Setup
+Go to **<https://aistudio.google.com/apikey>**, sign in with a Google account,
+and click *Create API key*. No billing setup is required — the free tier is
+enough to run this project. Copy the key; you will paste it into `.env` below.
 
-### Backend — http://127.0.0.1:8000
+### 2. Backend — http://127.0.0.1:8000
 
 ```bash
 cd backend
+
 python -m venv .venv
-.venv/Scripts/activate          # Windows
+.venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # macOS / Linux
+
 pip install -r requirements.txt
 
-cp .env.example .env            # then add your GEMINI_API_KEY
+cp .env.example .env            # then open .env and set GEMINI_API_KEY
 
-python run.py                   # or: uvicorn app.main:app --reload
+uvicorn main:app --reload
 ```
 
-The schema is applied automatically on startup; `init_db()` is idempotent.
+The SQLite schema is created automatically on first start. Check it came up:
 
 - Health: <http://127.0.0.1:8000/health>
-- API docs: <http://127.0.0.1:8000/docs>
+- Interactive API docs: <http://127.0.0.1:8000/docs>
 
-### Endpoints
+### 3. Frontend — http://localhost:3000
 
-| | |
-| --- | --- |
-| `POST /documents` | Upload a PDF: parse, chunk, store. Deduped by SHA-256 |
-| `GET /documents` | Workspace view: every document with fact/relationship counts |
-| `GET /documents/{id}` | One document, with chunk count |
-| `GET /documents/{id}/chunks` | Its chunks, with page ranges |
-| `GET /documents/{id}/file` | The stored original PDF |
-| `POST /documents/{id}/extract` | Run or re-run fact extraction |
-| `POST /documents/{id}/rechunk` | Rebuild chunks after changing settings |
-| `DELETE /documents/{id}` | Delete, cascading to everything derived |
-| `GET /facts` | List facts; filter by document, type, subject, confidence |
-| `GET /facts/{id}` | One fact with its grounding and EAV attributes |
-| `GET /schema` | The `fact_types` registry: labels the model invented |
-| `GET /facts/{id}/relationships` | Related facts with verdict and rationale |
-| `GET /facts/{id}/evidence` | Page image URL + highlight box, in image pixels |
-| `GET /documents/{id}/pages/{n}/image` | Rendered page PNG (cached) |
-| `POST /documents/{id}/reground` | Recompute page/bbox from stored quotes (free) |
-| `GET /review-queue` | Unresolved items with full context |
-| `GET /documents/{id}/progress` | Current ingestion phase and counters |
-| `GET /documents/{id}/progress/stream` | Live progress as server-sent events |
-| `GET /progress` | Recent and in-flight ingestions |
-| `POST /review-queue/{id}/resolve` | accepted / rejected / edited |
-| `POST /documents/{id}/link` | Run or re-run the relationship engine |
-| `GET /review` | The review queue: facts the pipeline flagged |
-| `GET /health` | Liveness, schema state, whether a Gemini key is set |
-
-```bash
-curl -F "file=@report.pdf" http://127.0.0.1:8000/documents
-```
-
-Uploading the same file twice returns the existing document with
-`deduplicated: true` and a 200 rather than a 201.
-
-Chunk size is tunable via `CHUNK_MAX_TOKENS` and `CHUNK_OVERLAP_TOKENS`;
-`POST /documents/{id}/rechunk` reapplies them to an already-ingested PDF.
-
-### Facts and the evolving schema
-
-Extraction runs per chunk right after chunking. `fact_type` is chosen by the
-model — there is no enum, no allowed-values list in the prompt, and no
-validation against one. `GET /schema` reports the labels that actually turned
-up:
-
-```bash
-curl http://127.0.0.1:8000/schema
-curl "http://127.0.0.1:8000/facts?fact_type=financial-metric"
-```
-
-Every fact carries a quote verified as a real substring of its source chunk,
-plus the page and bounding box where that quote sits in the PDF.
-
-### Nothing doubtful is thrown away
-
-A fact whose quote cannot be verified, or whose confidence falls below
-`REVIEW_CONFIDENCE_THRESHOLD` (default 0.9), is **still stored** — and also
-gets a `review_queue` row pointing at it:
-
-```bash
-curl http://127.0.0.1:8000/review
-```
-
-| Issue type | Meaning |
-| --- | --- |
-| `unverified_quote` | Quote is not a substring of the source chunk |
-| `ungrounded_quote` | Quote verified, but not locatable in the PDF (no bbox) |
-| `low_confidence` | Below the review threshold |
-| `extraction_failed` | The model call failed for that chunk |
-
-### Frontend — http://localhost:3000
+In a second terminal:
 
 ```bash
 cd frontend
 npm install
-cp .env.local.example .env.local
 npm run dev
 ```
 
-The landing page shows a live indicator for whether the backend is reachable.
+Open <http://localhost:3000>. Scroll past the explainer to reach the app.
+
+`frontend/.env.local` is optional — the API URL defaults to
+`http://127.0.0.1:8000`. Copy `.env.local.example` to `.env.local` only if your
+backend runs elsewhere.
+
+### 4. Add a document
+
+Use the **Upload** screen in the UI, or:
+
+```bash
+curl -F "file=@samples/starter-datasets/india-macroeconomy/02-rbi-annual-report-2024-25-excerpt.pdf" \
+     http://127.0.0.1:8000/documents
+```
+
+A 100-page report takes several minutes and roughly one model call per chunk.
+On the free tier, **start with a 10–15 page slice** — see *Limitations*. To
+ingest a folder with a page limit:
+
+```bash
+cd backend
+python scripts/bulk_ingest.py ../samples/starter-datasets/india-macroeconomy --pages 1-12
+python scripts/bulk_ingest.py <folder> --dry-run   # chunk counts, no API calls
+```
+
+### 5. Tests
+
+```bash
+cd backend
+pytest
+```
+
+Nine tests cover ingestion, grounding and the review queue with the model
+stubbed, so they are deterministic and need no API key. Three more exercise the
+live relationship classifier on synthetic inputs; they **skip cleanly** when no
+key is configured or the daily free-tier quota is spent.
+
+---
+
+## Video Demo
+
+**[Demo video — link to be added]**
+
+A shot-by-shot script is in [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md), built
+against the specific facts catalogued in
+[docs/DEMO_CASES.md](docs/DEMO_CASES.md), so nothing has to be found live on
+camera.
+
+---
+
+## Approach
+
+### The fact knowledge layer
+
+A document goes through eight steps. Each writes to its own table, so any stage
+can be re-run without redoing the ones before it.
+
+```
+PDF → parse → chunk → extract → ground → embed → link → review
+        │       │        │         │        │      │       │
+    documents chunks   facts    bbox on  embeddings │  review_queue
+                  fact_attributes  facts      relationships
+                    fact_types
+```
+
+The interesting problem is not extraction. It is **reconciliation** — deciding
+whether two numbers that differ actually disagree. That requirement drives
+every design decision below.
+
+### Why `fact_type` is free text with EAV attributes, not a fixed schema
+
+`facts.fact_type` is an unconstrained `TEXT` column. There is no enum, no
+lookup table, and no allowed-values list in the extraction prompt. Per-fact
+qualifiers live in `fact_attributes(fact_id, key, value)` — an
+entity-attribute-value sidecar whose keys are equally unconstrained.
+
+**Why:** we cannot know in advance what kinds of facts are in the documents. A
+financial filing yields revenue and headcount; a clinical paper yields dosages
+and cohort sizes; a regulatory notice yields deadlines and thresholds. The set
+of fact kinds is a property of the *corpus*, discovered at extraction time —
+not a property of the *application*, decidable at design time.
+
+A closed vocabulary does not prevent unexpected facts from existing. It only
+prevents you from finding out about them. Faced with a value it cannot express,
+an extractor either files a `regulatory_deadline` as `date` and loses the
+distinction, or drops the fact entirely — and both destroy information
+silently. Free text turns "a kind we did not anticipate" into a new row in the
+`fact_types` registry: visible, countable, reviewable.
+
+Running the three macro documents plus two Delhivery extracts produced **179
+distinct fact types**, including `waste-intensity`, `emission-intensity`,
+`current-account-deficit` and `bond-yield-trend`. None of those strings appears
+anywhere in the codebase.
+
+**What we give up, and what replaces it.** The database no longer validates
+that a type is meaningful. Those guarantees move up a layer: `fact_types` makes
+the vocabulary *observable* — near-duplicates show up as two low-count rows,
+which is a review signal — and `review_queue` catches what validation would
+have rejected and routes it to a human instead of to an exception.
+
+Crucially, the three axes that must be **machine-comparable** —
+`normalized_value`, `unit`, `time_scope` — *are* real indexed columns, because
+the linking step filters and groups on them constantly. The open parts are the
+parts only humans and models read. Adding a new kind of fact costs one
+`INSERT`, not one migration.
+
+### Why SQLite + brute-force cosine, not a vector database
+
+Embeddings are stored as float32 BLOBs in a SQLite table. Candidate retrieval
+loads every vector from *other* documents into one numpy matrix and scores it
+with a single dot product.
+
+At this scale that is simply the right answer. 1,000 facts × 768 dims is ~3 MB;
+the multiply is sub-millisecond. Measured on a 55-fact document: **0.3 ms** to
+build the pool, **0.01 ms** per similarity search. A vector database would add
+a service to run, a schema to keep in sync, and a failure mode to debug, in
+exchange for nothing measurable.
+
+**The trade-off, honestly:** this is O(n) per new fact and does not scale. It
+is fine into the low thousands of facts and stops being fine somewhere in the
+high tens of thousands, when reloading every vector per document begins to
+dominate. FAISS (in-process), pgvector (if the store moves to Postgres), or
+Qdrant (standalone) are the upgrade paths. `embeddings` is the only table that
+would change, and `load_candidate_pool()` / `find_candidates()` are the only
+callers — the seam is deliberately narrow.
+
+One scaling bug was found and fixed along the way: the pool was originally
+loaded *per fact* rather than per document, making ingestion O(new × existing)
+BLOB unpacks. Hoisting it out took a 55-fact document from 55 corpus loads to 1.
+
+### Why Gemini
+
+- **A free tier that can actually run this.** No billing setup, which matters
+  for a project someone else has to reproduce.
+- **Structured output via `response_schema`.** The extractor returns typed JSON
+  directly against a schema built from the SDK's types — no markdown fence to
+  strip, no JSON-repair pass. This is load-bearing: `fact_type` is declared as
+  a free `STRING` with no `enum`, so the schema constrains the *shape* without
+  constraining the *vocabulary*.
+- **Long context.** A 900-token chunk plus instructions is comfortable, and
+  batching a fact's whole candidate shortlist into one classification call is
+  what keeps the relationship engine affordable.
+- **Native PDF handling** was a factor in choosing it, though this
+  implementation does not use it: PyMuPDF parses locally, which keeps the
+  bounding-box grounding exact and avoids re-uploading documents per call.
+
+One concession the API forced: Gemini's response schema is an OpenAPI subset
+with no way to describe an object with arbitrary unknown keys, so open-ended
+`attributes` travel as an **array of `{key, value}` pairs** rather than an
+object. The keys stay unconstrained — the property that matters — and the shape
+maps one-to-one onto the EAV table.
+
+### Claude Code was used throughout
+
+This project was built with Claude Code (Opus 5) as the implementation tool,
+across eleven prompts, from the initial scaffold to this README. To be specific
+rather than vague about what that means:
+
+- **I specified, it implemented.** Every architectural decision above — free
+  text `fact_type`, EAV attributes, SQLite over a vector DB, evidence-first
+  comparison over a graph view — was specified in the prompts. Claude Code
+  wrote the code, and flagged trade-offs where an instruction and the evidence
+  disagreed.
+- **It found bugs by running things, not by reading them.** Several defects in
+  this repository were caught by Claude Code driving the system and measuring,
+  then reported rather than quietly patched. The notable ones: a quote locator
+  that matched a short fallback on the wrong page (13 of 56 facts affected); an
+  `async def` upload route that blocked the event loop and made the SSE
+  progress stream — the very thing meant to report on it — unresponsive; an
+  embedding call with no retry that silently lost a whole document's vectors to
+  a per-minute rate limit; and a preloader that was invisible in development
+  because of a React StrictMode double-invoke.
+- **It reported negative results.** A parallel page-parsing pass was
+  implemented, measured (1 worker 1.60s → 4 workers 3.43s, because PyMuPDF does
+  not release the GIL), and removed — with the numbers recorded in the code so
+  the idea is not re-attempted. A 3× concurrency speedup measured on a short
+  burst was explicitly *not* claimed for a 100-page document, because the
+  sustained run did not reproduce it.
+- **The git history is the record.** Each commit corresponds to a prompt, and
+  its message explains what was decided and why, including what did not work.
+  `git log` reads as the build plan.
+
+---
+
+## Limitations and Next Steps
+
+### Free-tier rate limits are the binding constraint
+
+This is the biggest practical limitation. Gemini's free tier caps requests
+**per model per day**, and one chunk is one call — a 100-page report is ~220
+calls. During development, eight different models were exhausted in a single
+day.
+
+The pipeline handles this correctly rather than crashing: a daily-quota error
+stops the run immediately, writes **one** review entry naming how many chunks
+went unprocessed, and sets the document status to `extraction_incomplete`.
+`POST /documents/{id}/extract` resumes later. But it does mean a first-time
+grader should **start with a 10–15 page slice**, not a full report.
+
+Concurrency does not rescue this. Bounded concurrency measured **3.08×** on a
+10-chunk burst (58.3s → 18.9s), but on a sustained 221-chunk run the per-chunk
+time drifted from 1.89s to 6.05s with no 429s returned — free-tier throughput
+appears to be paced server-side. The 3× figure is a burst result and should not
+be read as a whole-document one.
+
+### Table extraction is the weakest link
+
+Text is extracted linearly, so a table becomes *label, value, value*. Column
+association survives only by position. It works surprisingly often and fails
+silently when it does not. The concrete case is written up in
+[docs/FAILURE_CASE.md](docs/FAILURE_CASE.md): a waste-intensity figure of
+`23.3` extracted correctly with **no unit**, because the table never states one
+— a correct number that cannot be compared with anything.
+
+Relatedly, **footnotes are not attached to the values that reference them**. In
+that same case an asterisk pointed to text explaining a 2.4× year-on-year jump
+as an acquisition — exactly the reconciling context this product exists to
+surface — and it sat 784 characters away *in the same chunk*, unused.
+
+*Next steps:* attach footnote markers to the facts that reference them (highest
+value, and the information is already in the chunk); a table-aware pass using
+`page.find_tables()` so column-to-value association is structural rather than
+positional; and a narrowly scoped unit-inference second call for facts already
+flagged `ambiguous_unit` — which must be allowed to answer "none", or it will
+convert a visible gap into an invisible error.
+
+### No OCR fallback for scanned pages
+
+A PDF that opens but yields no text is rejected with a 422 naming OCR as the
+missing piece. That is honest, but it is still a refusal — image-only documents
+cannot be ingested at all. Tesseract or a vision-model pass would close it.
+
+### Brute-force similarity does not scale past a few thousand facts
+
+Covered under *Approach* above. Fine at current scale, wrong by ~10⁴ facts, and
+the replacement seam is deliberately narrow.
+
+### Other known gaps
+
+- **Ingestion runs inline in the upload request**, so a large document is a
+  multi-minute HTTP call. It is off the event loop, but a background job queue
+  is the right shape.
+- **The whole ingest is one transaction**, so nothing is durable until it
+  finishes. A crash at minute 21 of a 22-minute run loses everything.
+- **Re-running linking re-judges `unrelated` pairs.** Those verdicts are not
+  stored — deliberately, since the table answers "what does this relate to" —
+  so a re-run pays to reach the same conclusion again. A separate judged-pairs
+  ledger is the fix if re-runs become common.
+- **Document titles are often just filenames.** Inferring a title from body
+  text was implemented and removed: these are excerpts, so page one is usually
+  a contents page, and every heuristic produced labels like "Page No." A wrong
+  title looks authoritative; no title is honest.
+- **The confidence threshold is model-specific.** `gemini-3.6-flash` reports
+  1.0 for stated facts and bottoms out near 0.70 on hedged prose, so the
+  default is 0.9. Re-tune it when changing models.
+- **Contents pages produce junk facts.** Types like `page-number` and
+  `chapter-start-page` are real extractions from front matter. Ingesting body
+  page ranges avoids them; filtering them automatically would need a
+  document-structure pass.
+
+---
+
+## Additional Notes
+
+Two design decisions are worth calling out because they were deliberate
+departures from the obvious implementation.
+
+### The comparison card is not a graph
+
+The obvious way to show fact relationships is a node-and-edge diagram. This
+does not do that, and the reason is that a graph shows **that** two facts are
+connected while hiding **why** — and the why is the entire product.
+
+The primary view is two evidence cards side by side — statement, value, scope,
+subject, verbatim quote and source for each — with a verdict ribbon between
+them and the model's full rationale underneath. For a `reconciled` pair the
+reconciling axis is pulled out of the rationale into a bold
+`DIFFERS BY TIME PERIOD` / `DIFFERS BY DEFINITION` chip, because that phrase is
+the answer the user came for. Everything is readable without interaction and
+without hovering a node.
+
+A small network tab exists as a secondary view, since seeing that one fact is a
+hub is genuinely useful. It uses an analytic radial layout rather than a force
+simulation — this is always one centre and its direct neighbours, so the
+positions are known, and a physics engine would add jitter and a dependency for
+nothing.
+
+### The taxonomy panel is labelled "Discovered fact types"
+
+The wording is the point. These are not categories anyone designed. Each label
+was invented by the model when it met a fact it had no name for, and the list
+grows visibly as documents are ingested — 137 types before one upload during
+development, 179 after, gaining `waste-generation`, `air-emissions` and
+`emission-intensity` from sustainability pages nothing in the code anticipated.
+
+Calling that a "taxonomy" or "categories" would misrepresent it. Each row shows
+a count and a proportional bar, because the *shape* of the distribution is the
+interesting part: a long tail of count-1 types is what an evolving vocabulary
+actually looks like, and near-duplicates with low counts are the drift signal a
+fixed enum would have hidden.
+
+### Motion is deliberately split in two
+
+The landing explainer pins, scrubs and scroll-jacks. The app does none of those
+things — 200–300 ms stagger reveals only, no pinning, no scroll hijacking. The
+explainer is a pitch someone scrolls once, where pacing them through four ideas
+*is* the argument. The app is a tool someone operates for the tenth time today,
+where motion beyond making a state change legible is a tax charged on every
+repetition. That distinction is written at the top of `app-shell.tsx` so it
+does not get "improved" into more scroll-jacking later.
+
+---
 
 ## Layout
 
 ```
-backend/     FastAPI app, SQLite schema, pydantic models
-frontend/    Next.js App Router + TypeScript + Tailwind
-docs/        ARCHITECTURE.md
+backend/     FastAPI, SQLite, PyMuPDF, google-genai, numpy
+  app/       api/ · services/ · db/ · schemas/
+  scripts/   bulk_ingest.py
+  tests/     pytest
+frontend/    Next.js App Router, TypeScript, Tailwind, GSAP, Lenis
+docs/        ARCHITECTURE.md · DEMO_CASES.md · FAILURE_CASE.md · DEMO_SCRIPT.md
+samples/     starter datasets (PDFs are gitignored)
 ```
 
-`.env` files and `factpulse.db` are gitignored.
+`.env` files, `factpulse.db`, uploaded PDFs and rendered page images are all
+gitignored.
 
-### Cross-document relationships
+## Documentation
 
-After extraction, each document's facts are embedded and compared against
-everything already in the layer. Candidates come from cosine similarity
-(brute-force numpy, appropriate to this scale); a single Gemini call per fact
-judges its whole shortlist at once.
-
-| Verdict | Meaning |
+| Document | What is in it |
 | --- | --- |
-| `corroborates` | Same claim, independently stated |
-| `contradicts` | Incompatible under the same scope, period, unit and basis |
-| `reconciled` | Looks like a conflict; a named difference explains it |
-| `unrelated` | Retrieved but not actually about the same thing (not stored) |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The schema table by table, the pipeline, and the reasoning behind each decision |
+| [docs/DEMO_CASES.md](docs/DEMO_CASES.md) | The four required cases with exact fact IDs, verified against the API |
+| [docs/FAILURE_CASE.md](docs/FAILURE_CASE.md) | What the system got wrong, why the source made it hard, and what to do about it |
+| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Shot-by-shot script for the demo video |
 
-```bash
-curl http://127.0.0.1:8000/facts/1/relationships
-```
+## API
 
-Each entry carries the related fact, its document, page, quote and the
-rationale, so a comparison view renders without a second request.
+24 endpoints. The ones that matter:
 
-### Evidence grounding
-
-`GET /facts/{id}/evidence` returns the highlight box already scaled to the
-pixels of the page image it also links, so the frontend draws it directly:
-
-```json
-{
-  "page_image_url": "/documents/3/pages/8/image",
-  "page_image_width": 1190, "page_image_height": 1684, "render_scale": 2.0,
-  "bbox": { "x0": 100.0, "y0": 494.04, "x1": 663.62, "y1": 551.06 },
-  "quote": "Gross foreign exchange reserves were placed at 668 at the end...",
-  "page_number": 8, "grounded": true
-}
-```
-
-Pages are rendered on demand and cached by document hash.
-
-### The review queue
-
-Nothing doubtful is discarded. Facts that fail a check are stored *and* queued:
-
-| Issue type | Meaning |
+| | |
 | --- | --- |
-| `unverified_quote` | Quote is not a substring of the source chunk |
-| `ungrounded_quote` | Quote verified but not locatable in the PDF |
-| `low_confidence` | Below `REVIEW_CONFIDENCE_THRESHOLD` |
-| `ambiguous_unit` | Numeric value with no unit — the number is uninterpretable |
-| `borderline_confidence` | Confidence in the 0.50–0.70 band |
-| `extraction_failed` | The model call failed for that chunk |
-| `quota_exhausted` | Daily model quota spent; the document is incomplete |
-
-```bash
-curl http://127.0.0.1:8000/review-queue
-curl -X POST http://127.0.0.1:8000/review-queue/40/resolve   -H 'Content-Type: application/json'   -d '{"action":"edited","resolution_note":"Unit is Rs. crore per the table heading convention","correction":{"unit":"Rs. crore"}}'
-```
-
-`rejected` deletes the fact; `edited` writes corrections back. Grounding fields
-(quote, page, bbox) are **not** editable — a fact whose quote is wrong should be
-rejected, not patched into claiming evidence the PDF does not support.
-
-### Incremental multi-document ingestion
-
-The layer accumulates. Adding a document never re-processes what is already
-there: only the new file is parsed, chunked and extracted, only its facts are
-embedded, and only its facts act as the "A" side of a comparison. Existing
-facts are read to form the candidate pool, and their relationship lists grow --
-but they are never rewritten.
-
-```bash
-python scripts/bulk_ingest.py ../samples/starter-datasets/india-macroeconomy --pages 1-12
-python scripts/bulk_ingest.py <folder> --dry-run     # chunk counts, no API calls
-```
-
-`bulk_ingest.py` calls the same `ingest_pdf()` the API route uses, so it
-exercises the real path. Measured on the three India-macro excerpts:
-
-| # | Document | Pool before | Facts added | Embeddings added |
-| --- | --- | --- | --- | --- |
-| 1 | Economic Survey | 0 | +42 | +42 |
-| 2 | RBI Annual Report | 42 | +102 | +102 |
-| 3 | IMF Article IV | 144 | +86 | +86 |
-
-Embeddings added always equals that document's own fact count — earlier
-documents are read, never re-embedded.
-
-### Large PDFs
-
-Profiled on a 100-page, 6.5 MB annual report (221 chunks). Almost all the time
-is network: PDF text extraction is 1.7s, roughly 0.4% of the run.
-
-**Extraction runs with bounded concurrency** (`EXTRACTION_CONCURRENCY`, default
-5). Results stay in input order and database writes stay on one thread — only
-the model calls fan out. Measured **3.08×** on a 10-chunk burst (58.3s → 18.9s).
-
-On a sustained 221-chunk run the gain does not hold — per-chunk time drifts
-from 1.89s to 6.05s with no 429s returned, which looks like server-side pacing
-of free-tier throughput. The sequential baseline that would confirm this
-exhausted the daily quota at 37/221 chunks. Treat 3× as a burst figure, not a
-whole-document one.
-
-**Parallel page parsing was measured and removed.** PyMuPDF doesn't release the
-GIL, so threads made it monotonically worse (1 worker 1.60s → 4 workers 3.43s).
-The numbers are recorded in `_extract_pages()` so it isn't re-attempted.
-
-**Progress is streamed**, so a multi-minute ingest isn't a silent wait:
-
-```bash
-curl -N http://127.0.0.1:8000/documents/3/progress/stream
-```
-
-```js
-const es = new EventSource('/documents/3/progress/stream');
-es.onmessage = (e) => render(JSON.parse(e.data));
-```
-
-Phases are `parsing → chunking → extracting → embedding → linking → checking →
-done`, each with an N-of-M counter. Progress is per-phase rather than one global
-percentage, which would have to guess extraction time and would either lie or
-stall.
-
-**Every run appends a line to `backend/storage/ingest_log.jsonl`** — pages,
-chunks, facts, relationships, per-phase seconds, model and concurrency.
+| `POST /documents` | Upload and run the whole pipeline |
+| `GET /documents` | Workspace view with per-document counts |
+| `GET /documents/{id}/progress/stream` | Live ingestion progress (SSE) |
+| `GET /facts` | Cross-document by default; `?document_id=` to scope |
+| `GET /facts/{id}/evidence` | Page image URL + highlight box in image pixels |
+| `GET /facts/{id}/relationships` | Verdict, rationale, and the related fact in full |
+| `GET /schema` | The discovered `fact_types` registry |
+| `GET /review-queue` | Flagged items with context |
+| `POST /review-queue/{id}/resolve` | accepted / rejected / edited |

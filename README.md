@@ -15,11 +15,12 @@ reasoning behind it.
 
 ## Status
 
-Pipeline steps 1-3 (ingest, parse, chunk) are implemented and tested. Fact
-extraction, grounding, embedding, and linking are next.
+Pipeline steps 1-5 and 8 are implemented: ingest, parse, chunk, extract,
+ground, and review. Embedding and cross-document linking are next.
 
-No Gemini call is made anywhere yet, so the backend runs fully without
-`GEMINI_API_KEY`.
+Extraction needs `GEMINI_API_KEY`. Without it the backend still runs and still
+ingests documents; they simply stop at `chunked` and `POST /extract` answers
+503.
 
 ## Stack
 
@@ -59,8 +60,13 @@ The schema is applied automatically on startup; `init_db()` is idempotent.
 | `GET /documents/{id}` | One document, with chunk count |
 | `GET /documents/{id}/chunks` | Its chunks, with page ranges |
 | `GET /documents/{id}/file` | The stored original PDF |
+| `POST /documents/{id}/extract` | Run or re-run fact extraction |
 | `POST /documents/{id}/rechunk` | Rebuild chunks after changing settings |
 | `DELETE /documents/{id}` | Delete, cascading to everything derived |
+| `GET /facts` | List facts; filter by document, type, subject, confidence |
+| `GET /facts/{id}` | One fact with its grounding and EAV attributes |
+| `GET /schema` | The `fact_types` registry: labels the model invented |
+| `GET /review` | The review queue: facts the pipeline flagged |
 | `GET /health` | Liveness, schema state, whether a Gemini key is set |
 
 ```bash
@@ -72,6 +78,38 @@ Uploading the same file twice returns the existing document with
 
 Chunk size is tunable via `CHUNK_MAX_TOKENS` and `CHUNK_OVERLAP_TOKENS`;
 `POST /documents/{id}/rechunk` reapplies them to an already-ingested PDF.
+
+### Facts and the evolving schema
+
+Extraction runs per chunk right after chunking. `fact_type` is chosen by the
+model — there is no enum, no allowed-values list in the prompt, and no
+validation against one. `GET /schema` reports the labels that actually turned
+up:
+
+```bash
+curl http://127.0.0.1:8000/schema
+curl "http://127.0.0.1:8000/facts?fact_type=financial-metric"
+```
+
+Every fact carries a quote verified as a real substring of its source chunk,
+plus the page and bounding box where that quote sits in the PDF.
+
+### Nothing doubtful is thrown away
+
+A fact whose quote cannot be verified, or whose confidence falls below
+`REVIEW_CONFIDENCE_THRESHOLD` (default 0.5), is **still stored** — and also
+gets a `review_queue` row pointing at it:
+
+```bash
+curl http://127.0.0.1:8000/review
+```
+
+| Issue type | Meaning |
+| --- | --- |
+| `unverified_quote` | Quote is not a substring of the source chunk |
+| `ungrounded_quote` | Quote verified, but not locatable in the PDF (no bbox) |
+| `low_confidence` | Below the review threshold |
+| `extraction_failed` | The model call failed for that chunk |
 
 ### Frontend — http://localhost:3000
 

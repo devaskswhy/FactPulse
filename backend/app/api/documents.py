@@ -17,8 +17,11 @@ from app.schemas.document import (
     DocumentUploadResponse,
     RechunkResponse,
 )
+from app.schemas.fact import ExtractionSummaryOut
+from app.services.extract import ExtractionError
 from app.services.ingest import EmptyPdfError, ingest_pdf, rechunk_document
 from app.services.pdf import PdfParseError
+from app.services.pipeline import extract_document_facts
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -32,6 +35,14 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 async def upload_document(
     response: Response,
     file: UploadFile = File(..., description="The PDF to ingest."),
+    extract: bool | None = Query(
+        None,
+        description=(
+            "Run fact extraction after chunking. Defaults to the "
+            "EXTRACT_ON_UPLOAD setting. Skipped silently when no Gemini key "
+            "is configured."
+        ),
+    ),
     conn: sqlite3.Connection = Depends(db_dependency),
 ) -> DocumentUploadResponse:
     """Ingest one PDF.
@@ -50,7 +61,12 @@ async def upload_document(
         )
 
     try:
-        result = ingest_pdf(conn, filename=file.filename or "untitled.pdf", data=data)
+        result = ingest_pdf(
+            conn,
+            filename=file.filename or "untitled.pdf",
+            data=data,
+            extract=extract,
+        )
     except EmptyPdfError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except PdfParseError as exc:
@@ -63,6 +79,11 @@ async def upload_document(
         document=result.document,
         chunk_count=result.chunk_count,
         deduplicated=result.deduplicated,
+        extraction=(
+            ExtractionSummaryOut(**result.extraction.as_dict())
+            if result.extraction
+            else None
+        ),
     )
 
 
@@ -161,4 +182,35 @@ def delete_document(
     """
     if not repo.delete_document(conn, document_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no document {document_id}")
+    # fact_types counters are maintained on write, so the cascade that just
+    # removed this document's facts left them overstating reality. Rebuild.
+    repo.resync_fact_types(conn)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{document_id}/extract",
+    response_model=ExtractionSummaryOut,
+    summary="Run (or re-run) fact extraction for a document",
+)
+def extract(
+    document_id: int,
+    replace: bool = Query(
+        True,
+        description=(
+            "Clear existing facts for this document first. False appends, which "
+            "will duplicate facts if the document was already extracted."
+        ),
+    ),
+    conn: sqlite3.Connection = Depends(db_dependency),
+) -> ExtractionSummaryOut:
+    """Extract facts from every chunk of an already-ingested document."""
+    document = _require_document(conn, document_id)
+    try:
+        summary = extract_document_facts(conn, document, replace=replace)
+    except ExtractionError as exc:
+        # No key configured, or the client could not be built at all.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return ExtractionSummaryOut(**summary.as_dict())

@@ -24,13 +24,17 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-2.5-flash"
     gemini_embedding_model: str = "text-embedding-004"
     embedding_dim: int = 768
 
     # storage
     database_path: str = "factpulse.db"
     upload_dir: str = "uploads"
+
+    # extraction
+    extract_on_upload: bool = True
+    review_confidence_threshold: float = 0.5
 
     # chunking
     chunk_max_tokens: int = 900

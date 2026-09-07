@@ -46,6 +46,8 @@ Steps 5 and 7 are the two that make this more than a summarizer. Step 5 means
 no fact exists in the system without a page and a rectangle you can point at.
 Step 7 is where the cross-document judgement happens.
 
+Steps 1-5 and 8 are implemented. Steps 6-7 are not.
+
 ---
 
 ## 2. Layout
@@ -61,12 +63,15 @@ Step 7 is where the cross-document judgement happens.
       repository.py    SQL for documents and chunks
     api/
       health.py        GET /health
-      documents.py     upload, list, inspect, rechunk, delete
+      documents.py     upload, list, inspect, extract, rechunk, delete
+      facts.py         GET /facts, /facts/{id}, /schema, /review
     schemas/           pydantic models for every request and response
     services/
-      pdf.py           PyMuPDF parsing, text cleanup, content-addressed storage
+      pdf.py           PyMuPDF parsing, text cleanup, storage, quote grounding
       chunker.py       page-aware chunking with overlap
-      ingest.py        steps 1-3 wired together in one transaction
+      extract.py       Gemini structured-output fact extraction
+      pipeline.py      verify, ground, persist, route for review
+      ingest.py        steps 1-5 wired together in one transaction
   run.py               dev entrypoint
 /frontend              Next.js App Router, TypeScript, Tailwind
 /docs                  this file
@@ -250,7 +255,106 @@ reimpose exactly the constraint the SQL was written to avoid.
 
 ---
 
-## 5. Reconciliation
+## 5. Extraction and grounding
+
+Steps 4, 5 and 8. `extract.py` calls the model; `pipeline.py` decides what to
+trust and what to write.
+
+### Structured output, not parsed text
+
+The model is called with `response_schema`, so it returns typed JSON directly.
+Nothing scrapes JSON out of a markdown fence, and there is no repair pass for
+malformed output — a response that does not fit the schema is a failed call,
+handled as one.
+
+Two properties of that schema are load-bearing:
+
+**`fact_type` is a free `STRING` with no `enum`.** The prompt gives no list of
+candidate labels and no house vocabulary to match — only a format (lowercase
+kebab-case, one to three words) and an instruction to invent whatever label
+fits. Constraining it in the schema would defeat section 4 just as thoroughly
+as constraining it in SQL, so it is left open in both places.
+
+**`attributes` is an ARRAY of `{key, value}` pairs, not an object.** This is a
+concession to the API, not a design preference. Gemini's response schema is an
+OpenAPI subset with no way to describe an object with arbitrary unknown keys,
+so an open-ended `attributes: {...}` cannot be expressed. The array form keeps
+the keys completely unconstrained — which is the property that matters — and
+maps one-to-one onto `fact_attributes`. `_coerce_attributes()` folds it back
+into a dict, and also accepts a plain object in case a future model version
+returns one.
+
+### Quote verification
+
+The model is asked for a verbatim quote. It is not trusted to have supplied
+one.
+
+`verify_quote()` matches case-insensitively with whitespace normalized, because
+models reflow and re-case text they are quoting, and rejecting a fact over a
+collapsed newline would be pedantry rather than verification. What it returns
+is the span **as it appears in the chunk**, recovered through an index map back
+to the original string — so the `quote` column holds the document's wording,
+not the model's rendering of it.
+
+A quote that cannot be found is the interesting case: it means the model
+produced a plausible sentence that is not in the source. That is exactly the
+failure this system exists to catch.
+
+### Grounding
+
+`locate_quote_bbox()` reopens the stored PDF and uses `page.search_for()`,
+trying the chunk's page range first and the rest of the document second. The
+box returned is the union of every rectangle the match spans, so a quote
+wrapping across lines yields one box covering all of them.
+
+Verification and grounding are kept separate because they fail for different
+reasons. Chunk text has been cleaned — ligatures folded, hyphenation joined,
+whitespace collapsed — so a quote can verify against the chunk and still not
+match the raw glyph stream in the PDF. That is a missing highlight box, not a
+fabricated quote, and it gets its own issue type.
+
+When no box is found, `page_number` is set from the chunk only if the chunk
+sits on a single page. For a multi-page chunk the page would be a guess, so it
+stays NULL rather than being invented.
+
+### Nothing doubtful is discarded
+
+A fact that fails verification or scores low confidence is **still written to
+`facts`**, and additionally gets a `review_queue` row pointing at it. The
+failure stays visible and queryable instead of vanishing between the model and
+the database — which is the whole reason the review queue exists.
+
+| Issue type | Meaning |
+| --- | --- |
+| `unverified_quote` | Quote is not a substring of the source chunk. The fact is not grounded in the document. |
+| `ungrounded_quote` | Quote verified against the chunk but could not be located in the PDF, so it has no bounding box. |
+| `low_confidence` | Model's own confidence is below `REVIEW_CONFIDENCE_THRESHOLD` (default 0.5). |
+| `extraction_failed` | The model call failed for a chunk. Recorded against the chunk, so the gap in coverage is visible. |
+
+Both can apply to one fact, producing two rows.
+
+The single exception is a fact returned with no type, no statement, or no quote
+at all. There is nothing to store and nothing to review, so it is dropped in
+`extract.py` — with a log line, not in silence.
+
+### Failure isolation
+
+One chunk failing does not lose the document. The failure is recorded against
+the chunk and the run continues, ending in status `extracted_with_errors`
+rather than `extracted`. Likewise a document whose extraction fails entirely
+keeps its rows: ingestion is complete and useful without the model, so a
+missing key leaves the document at `chunked` rather than failing the upload.
+
+### Where extraction runs
+
+Inline, in the upload request, right after chunking. That keeps upload-to-facts
+a single call at the cost of a slow upload for a large document. A background
+job is the obvious next move; `POST /documents/{id}/extract` already exists as
+the re-run path and would become the queue's entry point.
+
+---
+
+## 6. Reconciliation
 
 Given two facts about the same subject, the linking step decides between
 roughly:
@@ -275,7 +379,7 @@ two highlighted source rectangles.
 
 ---
 
-## 6. Configuration
+## 7. Configuration
 
 `backend/.env` (see `backend/.env.example`; `.env` is gitignored):
 
@@ -296,52 +400,58 @@ throughout).
 
 ---
 
-## 7. Current status
+## 8. Current status
 
-Steps 1-3 of the pipeline are implemented and tested; steps 4-8 are not.
+Pipeline steps 1-5 and 8 are implemented. Steps 6-7 (embedding and
+cross-document linking) are not.
 
 **Working**
 
 - SQLite schema, applied automatically on boot
-- **Ingest, parse, chunk** — `POST /documents` takes a PDF, dedupes it by
-  SHA-256, parses it with PyMuPDF, chunks it page-aware, and writes
-  `documents` + `chunks` in one transaction
-- `GET /documents`, `GET /documents/{id}`, `GET /documents/{id}/chunks`
-- `GET /documents/{id}/file` — the stored original, for the page viewer
-- `POST /documents/{id}/rechunk` — rebuild chunks after changing settings
-- `DELETE /documents/{id}` — cascades to everything derived
-- `GET /health`, `GET /` — liveness, schema state, Gemini key presence
-- pydantic models for every table and every response
+- **Ingest, parse, chunk** — `POST /documents` dedupes by SHA-256, parses with
+  PyMuPDF, chunks page-aware, writes `documents` + `chunks` in one transaction
+- **Extract, ground, review** — Gemini structured output per chunk; quotes
+  verified against the source, located in the PDF for a bounding box, and
+  written to `facts`, `fact_attributes` and the `fact_types` registry. Anything
+  doubtful also lands in `review_queue`
+- `GET /facts`, `GET /facts/{id}` — facts with grounding and attributes
+- `GET /schema` — the fact_types registry, the vocabulary the corpus produced
+- `GET /review` — the review queue
+- `POST /documents/{id}/extract` — run or re-run extraction
+- Document CRUD, chunk listing, original-PDF download, rechunk
+- `GET /health` — liveness, schema state, Gemini key presence
 - Next.js "Hello FactPulse" page with a live backend status indicator
 
 **Not built yet**
 
-Fact extraction, grounding, embedding, linking, and the UI beyond the landing
-page. No Gemini call is made anywhere yet, so the backend runs fully without
-`GEMINI_API_KEY`.
+Embeddings, cross-document linking, and the UI beyond the landing page. The
+`embeddings` and `relationships` tables exist but are empty.
 
 ### Notes on the ingest step
 
 - **Parse before write.** The PDF is fully parsed before any row is inserted,
-  so an unreadable upload never leaves a half-created document behind. The
-  document, its chunks, and the final status then land in one transaction.
-- **Content-addressed storage.** The original bytes are kept at
-  `uploads/<sha256>.pdf`. Grounding needs the file to turn a quote into a
-  bounding box, and the viewer needs it to render pages. Because the name is
-  the hash, re-uploading a duplicate writes nothing, and `DELETE` leaves the
-  file alone — another document row may legitimately reference the same bytes.
-- **Dedupe answers 200, not 201.** A repeat upload returns the existing
-  document with `deduplicated: true`; nothing was created, so the status code
-  says so.
-- **Scanned PDFs are rejected explicitly.** A PDF that opens but yields no text
-  returns 422 with a message naming OCR as the missing piece, distinct from the
-  400 returned for bytes that are not a PDF at all. The two need different
-  fixes, so they are different errors.
-- **Token counts are estimates.** `chunks.token_count` comes from a
-  ~4-chars-per-token heuristic rather than a real tokenizer; it decides where to
-  cut, and pulling in a tokenizer dependency for that is not worth it. Treat the
-  column as approximate.
-- **Chunk overlap carries page attribution.** When a chunk's tail is repeated
-  into the next chunk, that chunk's `page_start` is the page the tail came
-  from, not the page that follows. A fact extracted from the repeated text
-  therefore still points at the right page.
+  so an unreadable upload never leaves a half-created document behind.
+- **Content-addressed storage.** Originals are kept at `uploads/<sha256>.pdf`.
+  Grounding needs the file to turn a quote into a box, and the viewer needs it
+  to render pages. `DELETE` leaves the file alone — another document row may
+  reference the same bytes.
+- **Dedupe answers 200, not 201.** Nothing was created, so the status says so.
+- **Scanned PDFs are rejected explicitly** with 422 naming OCR as the missing
+  piece, distinct from the 400 for bytes that are not a PDF.
+- **Token counts are estimates** (~4 chars/token), used only to decide where to
+  cut. Treat the column as approximate.
+- **Chunk overlap carries page attribution.** A chunk's `page_start` is the
+  page its repeated tail came from, so a fact found in that text still points
+  at the right page.
+
+### Known limits
+
+- Extraction runs inline in the upload request, so a large document makes for a
+  slow upload.
+- Chunks are processed sequentially, one model call each.
+- Re-running extraction with `replace=false` will duplicate facts; there is no
+  fact-level deduplication yet.
+- `fact_types` counters are maintained on write, so a cascade delete does not
+  decrement them. `resync_fact_types()` rebuilds the registry from the facts
+  table, and runs after both a `replace=true` extraction and a document
+  delete.

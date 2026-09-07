@@ -68,6 +68,13 @@ class DocumentUploadResponse(BaseModel):
     deduplicated: bool = Field(
         ..., description="True when this exact file had already been ingested."
     )
+    extraction: "ExtractionSummaryOut | None" = Field(
+        None,
+        description=(
+            "Result of the extraction step, or null when it was skipped "
+            "(switched off, or no Gemini key configured)."
+        ),
+    )
 
 
 class ChunkList(BaseModel):
@@ -79,3 +86,8 @@ class ChunkList(BaseModel):
 class RechunkResponse(BaseModel):
     document_id: int
     chunk_count: int = Field(..., ge=0, description="Chunks after re-chunking.")
+
+
+from app.schemas.fact import ExtractionSummaryOut  # noqa: E402  (circular-import break)
+
+DocumentUploadResponse.model_rebuild()

@@ -8,6 +8,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.schemas.review import ReviewItem
+
 
 class BBox(BaseModel):
     """Bounding box of the source quote on its page, in PDF points."""
@@ -85,3 +87,48 @@ class FactType(BaseModel):
     fact_count: int = 0
 
     model_config = {"from_attributes": True}
+
+
+class FactList(BaseModel):
+    total: int = Field(..., ge=0, description="Facts matching the filter, before paging.")
+    facts: list[Fact] = Field(default_factory=list)
+
+
+class ExtractionSummaryOut(BaseModel):
+    """What one extraction run did. Returned by upload and by /extract."""
+
+    document_id: int
+    chunks_processed: int = Field(..., ge=0)
+    chunks_failed: int = Field(..., ge=0, description="Chunks whose model call failed.")
+    facts_inserted: int = Field(..., ge=0)
+    facts_grounded: int = Field(
+        ..., ge=0, description="Facts whose quote verified AND was located in the PDF."
+    )
+    facts_unverified: int = Field(
+        ..., ge=0, description="Facts whose quote was not found in the source chunk."
+    )
+    facts_low_confidence: int = Field(
+        ..., ge=0, description="Facts below the review confidence threshold."
+    )
+    review_items: int = Field(..., ge=0, description="Rows added to review_queue.")
+    fact_types: list[str] = Field(
+        default_factory=list,
+        description="Distinct fact_type labels the model invented in this run.",
+    )
+
+
+class SchemaResponse(BaseModel):
+    """The fact_types registry: the vocabulary the corpus has actually produced.
+
+    This is observed, not permitted. Nothing constrains facts to these types --
+    the registry exists so the evolving vocabulary is visible.
+    """
+
+    total_types: int = Field(..., ge=0)
+    total_facts: int = Field(..., ge=0)
+    fact_types: list[FactType] = Field(default_factory=list)
+
+
+class ReviewList(BaseModel):
+    total: int = Field(..., ge=0)
+    items: list[ReviewItem] = Field(default_factory=list)

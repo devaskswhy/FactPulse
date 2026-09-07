@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlite3
 
 from app.schemas.document import Chunk, Document
+from app.schemas.fact import BBox, Fact, FactAttribute, FactType, Grounding
+from app.schemas.review import ReviewItem
 from app.services.chunker import ChunkDraft
 
 # ------------------------------------------------------------------ documents
@@ -129,3 +131,298 @@ def delete_chunks(conn: sqlite3.Connection, document_id: int) -> int:
     """Remove a document's chunks so it can be re-parsed from scratch."""
     cur = conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
     return cur.rowcount
+
+
+# ---------------------------------------------------------------------- facts
+
+
+def _to_fact(row: sqlite3.Row, attributes: list[FactAttribute] | None = None) -> Fact:
+    bbox = None
+    if row["bbox_x0"] is not None:
+        bbox = BBox(
+            x0=row["bbox_x0"], y0=row["bbox_y0"], x1=row["bbox_x1"], y1=row["bbox_y1"]
+        )
+    grounding = None
+    if row["quote"] is not None or row["page_number"] is not None:
+        grounding = Grounding(
+            quote=row["quote"], page_number=row["page_number"], bbox=bbox
+        )
+    return Fact(
+        id=row["id"],
+        document_id=row["document_id"],
+        chunk_id=row["chunk_id"],
+        fact_type=row["fact_type"],
+        subject=row["subject"],
+        statement=row["statement"],
+        normalized_value=row["normalized_value"],
+        unit=row["unit"],
+        time_scope=row["time_scope"],
+        confidence=row["confidence"],
+        created_at=row["created_at"],
+        grounding=grounding,
+        attributes=attributes or [],
+    )
+
+
+def insert_fact(
+    conn: sqlite3.Connection,
+    *,
+    document_id: int,
+    chunk_id: int | None,
+    fact_type: str,
+    subject: str | None,
+    statement: str,
+    normalized_value: str | None,
+    unit: str | None,
+    time_scope: str | None,
+    quote: str | None,
+    page_number: int | None,
+    bbox: tuple[float, float, float, float] | None,
+    confidence: float | None,
+) -> int:
+    x0, y0, x1, y1 = bbox if bbox else (None, None, None, None)
+    cur = conn.execute(
+        "INSERT INTO facts (document_id, chunk_id, fact_type, subject, statement, "
+        "normalized_value, unit, time_scope, quote, page_number, "
+        "bbox_x0, bbox_y0, bbox_x1, bbox_y1, confidence) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            document_id, chunk_id, fact_type, subject, statement,
+            normalized_value, unit, time_scope, quote, page_number,
+            x0, y0, x1, y1, confidence,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def insert_fact_attributes(
+    conn: sqlite3.Connection, fact_id: int, attributes: dict[str, str]
+) -> int:
+    """Write the EAV rows for one fact. Keys are whatever the model chose."""
+    rows = [(fact_id, str(k), str(v)) for k, v in attributes.items() if str(k).strip()]
+    if rows:
+        conn.executemany(
+            "INSERT INTO fact_attributes (fact_id, key, value) VALUES (?, ?, ?)", rows
+        )
+    return len(rows)
+
+
+def get_fact_attributes(conn: sqlite3.Connection, fact_id: int) -> list[FactAttribute]:
+    rows = conn.execute(
+        "SELECT key, value FROM fact_attributes WHERE fact_id = ? ORDER BY id",
+        (fact_id,),
+    ).fetchall()
+    return [FactAttribute(key=r["key"], value=r["value"]) for r in rows]
+
+
+def get_fact(conn: sqlite3.Connection, fact_id: int) -> Fact | None:
+    row = conn.execute("SELECT * FROM facts WHERE id = ?", (fact_id,)).fetchone()
+    if row is None:
+        return None
+    return _to_fact(row, get_fact_attributes(conn, fact_id))
+
+
+def list_facts(
+    conn: sqlite3.Connection,
+    *,
+    document_id: int | None = None,
+    fact_type: str | None = None,
+    subject: str | None = None,
+    min_confidence: float | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[Fact]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if document_id is not None:
+        clauses.append("document_id = ?")
+        params.append(document_id)
+    if fact_type:
+        clauses.append("fact_type = ?")
+        params.append(fact_type)
+    if subject:
+        clauses.append("subject LIKE ?")
+        params.append(f"%{subject}%")
+    if min_confidence is not None:
+        clauses.append("confidence >= ?")
+        params.append(min_confidence)
+
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM facts{where} ORDER BY id LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+
+    # One query for every attribute of the page of facts, rather than one per
+    # fact. The EAV table is the thing most likely to be read hot.
+    ids = [r["id"] for r in rows]
+    by_fact: dict[int, list[FactAttribute]] = {i: [] for i in ids}
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        for attr in conn.execute(
+            f"SELECT fact_id, key, value FROM fact_attributes "
+            f"WHERE fact_id IN ({placeholders}) ORDER BY id",
+            ids,
+        ):
+            by_fact[attr["fact_id"]].append(
+                FactAttribute(key=attr["key"], value=attr["value"])
+            )
+
+    return [_to_fact(r, by_fact.get(r["id"], [])) for r in rows]
+
+
+def count_facts(
+    conn: sqlite3.Connection,
+    *,
+    document_id: int | None = None,
+    fact_type: str | None = None,
+    subject: str | None = None,
+    min_confidence: float | None = None,
+) -> int:
+    clauses: list[str] = []
+    params: list[object] = []
+    if document_id is not None:
+        clauses.append("document_id = ?")
+        params.append(document_id)
+    if fact_type:
+        clauses.append("fact_type = ?")
+        params.append(fact_type)
+    if subject:
+        clauses.append("subject LIKE ?")
+        params.append(f"%{subject}%")
+    if min_confidence is not None:
+        clauses.append("confidence >= ?")
+        params.append(min_confidence)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return conn.execute(f"SELECT COUNT(*) AS n FROM facts{where}", params).fetchone()["n"]
+
+
+def delete_facts_for_document(conn: sqlite3.Connection, document_id: int) -> int:
+    """Clear a document's facts so extraction can be re-run.
+
+    fact_attributes, embeddings and review_queue rows cascade from facts. The
+    fact_types registry is rebuilt separately by resync_fact_types().
+    """
+    cur = conn.execute("DELETE FROM facts WHERE document_id = ?", (document_id,))
+    return cur.rowcount
+
+
+# ----------------------------------------------------------------- fact_types
+
+
+def upsert_fact_type(conn: sqlite3.Connection, name: str, example_fact_id: int) -> None:
+    """Register a fact type, or bump its count if already known.
+
+    This is a registry maintained on write, not a constraint: nothing stops a
+    fact carrying a type absent from this table, and the ON CONFLICT branch
+    deliberately leaves first_seen_at and example_fact_id alone so the first
+    sighting stays the recorded one.
+    """
+    conn.execute(
+        "INSERT INTO fact_types (name, example_fact_id, fact_count) VALUES (?, ?, 1) "
+        "ON CONFLICT(name) DO UPDATE SET fact_count = fact_count + 1",
+        (name, example_fact_id),
+    )
+
+
+def list_fact_types(conn: sqlite3.Connection) -> list[FactType]:
+    rows = conn.execute(
+        "SELECT * FROM fact_types ORDER BY fact_count DESC, name"
+    ).fetchall()
+    return [
+        FactType(
+            name=r["name"],
+            first_seen_at=r["first_seen_at"],
+            example_fact_id=r["example_fact_id"],
+            fact_count=r["fact_count"],
+        )
+        for r in rows
+    ]
+
+
+def resync_fact_types(conn: sqlite3.Connection) -> int:
+    """Rebuild the registry from the facts table.
+
+    Needed after deleting facts, since the counters are maintained on write and
+    a cascade delete does not decrement them. Types whose facts are all gone are
+    dropped; first_seen_at is preserved for those that survive.
+    """
+    conn.execute(
+        "DELETE FROM fact_types WHERE name NOT IN (SELECT DISTINCT fact_type FROM facts)"
+    )
+    rows = conn.execute(
+        "SELECT fact_type, COUNT(*) AS n, MIN(id) AS example FROM facts GROUP BY fact_type"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "INSERT INTO fact_types (name, example_fact_id, fact_count) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET fact_count = excluded.fact_count, "
+            "example_fact_id = COALESCE(fact_types.example_fact_id, excluded.example_fact_id)",
+            (row["fact_type"], row["example"], row["n"]),
+        )
+    return len(rows)
+
+
+# --------------------------------------------------------------- review_queue
+
+
+def insert_review_item(
+    conn: sqlite3.Connection,
+    *,
+    fact_id: int | None,
+    chunk_id: int | None,
+    issue_type: str,
+    note: str | None,
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO review_queue (fact_id, chunk_id, issue_type, note) "
+        "VALUES (?, ?, ?, ?)",
+        (fact_id, chunk_id, issue_type, note),
+    )
+    return int(cur.lastrowid)
+
+
+def list_review_queue(
+    conn: sqlite3.Connection,
+    *,
+    resolved: bool | None = None,
+    issue_type: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[ReviewItem]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if resolved is not None:
+        clauses.append("resolved = ?")
+        params.append(1 if resolved else 0)
+    if issue_type:
+        clauses.append("issue_type = ?")
+        params.append(issue_type)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM review_queue{where} ORDER BY id LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    return [
+        ReviewItem(
+            id=r["id"],
+            fact_id=r["fact_id"],
+            chunk_id=r["chunk_id"],
+            issue_type=r["issue_type"],
+            note=r["note"],
+            resolved=bool(r["resolved"]),
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
+
+
+def count_review_queue(
+    conn: sqlite3.Connection, *, resolved: bool | None = None
+) -> int:
+    if resolved is None:
+        return conn.execute("SELECT COUNT(*) AS n FROM review_queue").fetchone()["n"]
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM review_queue WHERE resolved = ?",
+        (1 if resolved else 0,),
+    ).fetchone()["n"]

@@ -13,8 +13,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.db import repository as repo
 from app.db.database import db_dependency
-from app.schemas.fact import BBox, Fact, FactList, Grounding, ReviewList, SchemaResponse
+from app.core.config import settings
+from app.schemas.fact import (
+    BBox,
+    EvidenceBundle,
+    Fact,
+    FactList,
+    Grounding,
+    PixelBBox,
+    ReviewList,
+    SchemaResponse,
+)
 from app.schemas.relationship import RelatedFact, RelationshipList
+from app.services.render import PageRenderError, page_dimensions, scale_bbox
 
 router = APIRouter(tags=["facts"])
 
@@ -168,3 +179,73 @@ def get_fact_relationships(
     if relationship_type:
         related = [r for r in related if r.relationship_type == relationship_type]
     return RelationshipList(fact_id=fact_id, total=len(related), relationships=related)
+
+
+@router.get(
+    "/facts/{fact_id}/evidence",
+    response_model=EvidenceBundle,
+    summary="Everything needed to show where a fact came from",
+)
+def get_fact_evidence(
+    fact_id: int, conn: sqlite3.Connection = Depends(db_dependency)
+) -> EvidenceBundle:
+    """The fact, its page image, and the highlight box in IMAGE PIXELS.
+
+    `bbox` is already scaled to the dimensions of the PNG served at
+    `page_image_url`, so the frontend draws it directly with no conversion. If
+    it scales the image to fit a container, it scales the box by the same
+    ratio; `page_image_width`/`height` give the reference dimensions.
+
+    A fact whose quote was never located in the PDF is still returned, with
+    `grounded: false` and a null bbox, rather than 404 -- an ungrounded fact is
+    exactly what a reviewer needs to look at.
+    """
+    fact = repo.get_fact(conn, fact_id)
+    if fact is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no fact {fact_id}")
+
+    document = repo.get_document(conn, fact.document_id)
+    if document is None:  # pragma: no cover - FK makes this unreachable
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail=f"no document {fact.document_id}"
+        )
+
+    grounding = fact.grounding
+    page_number = grounding.page_number if grounding else None
+    pdf_path = settings.upload_path / f"{document.sha256}.pdf"
+
+    width = height = 0
+    scale = settings.page_render_scale
+    if page_number is not None and pdf_path.exists():
+        try:
+            width, height, scale = page_dimensions(pdf_path, page_number)
+        except PageRenderError:
+            width = height = 0
+
+    pixel_bbox = None
+    pdf_bbox = grounding.bbox if grounding else None
+    if pdf_bbox is not None and width:
+        x0, y0, x1, y1 = scale_bbox(
+            (pdf_bbox.x0, pdf_bbox.y0, pdf_bbox.x1, pdf_bbox.y1), scale
+        )
+        pixel_bbox = PixelBBox(x0=x0, y0=y0, x1=x1, y1=y1)
+
+    return EvidenceBundle(
+        fact=fact,
+        page_image_url=(
+            f"/documents/{document.id}/pages/{page_number}/image"
+            if page_number is not None
+            else ""
+        ),
+        page_image_width=width,
+        page_image_height=height,
+        render_scale=scale,
+        bbox=pixel_bbox,
+        bbox_pdf_points=pdf_bbox,
+        quote=grounding.quote if grounding else None,
+        document_id=document.id,
+        document_title=document.title,
+        document_filename=document.filename,
+        page_number=page_number,
+        grounded=pixel_bbox is not None,
+    )

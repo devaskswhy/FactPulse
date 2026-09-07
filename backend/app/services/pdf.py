@@ -238,17 +238,23 @@ def locate_quote_bbox(
         else:
             ordered = list(range(doc.page_count))
 
-        for index in ordered:
-            if index < 0 or index >= doc.page_count:
-                continue
-            page = doc.load_page(index)
-
-            # Try the whole quote, then shorter leading fragments. PyMuPDF
-            # matches within a page's text runs, so a long quote crossing a
-            # column or paragraph break can fail while its opening clause hits.
-            for candidate in _search_candidates(cleaned):
+        # Candidates OUTER, pages INNER. This ordering is load-bearing: a
+        # shortened fallback is far less distinctive than the full quote, and a
+        # report that repeats boilerplate ("Gross foreign exchange reserves
+        # were ...") will match it on dozens of pages. Iterating pages outer
+        # let a five-word prefix match on an early page and return, while the
+        # full quote -- unique to one page -- was never tried there. The result
+        # was a highlight over the right-looking sentence on the wrong page,
+        # showing a different number than the fact claimed.
+        #
+        # So: exhaust the most specific candidate across every page before
+        # falling back to a shorter one.
+        for candidate in _search_candidates(cleaned):
+            for index in ordered:
+                if index < 0 or index >= doc.page_count:
+                    continue
                 try:
-                    rects = page.search_for(candidate)
+                    rects = doc.load_page(index).search_for(candidate)
                 except Exception:
                     continue
                 if rects:

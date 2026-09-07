@@ -28,6 +28,7 @@ from app.schemas.document import Chunk, Document
 from app.services.extract import (
     ExtractedFact,
     ExtractionError,
+    QuotaExhaustedError,
     build_client,
     extract_facts_from_chunk,
 )
@@ -41,6 +42,7 @@ ISSUE_UNVERIFIED_QUOTE = "unverified_quote"
 ISSUE_LOW_CONFIDENCE = "low_confidence"
 ISSUE_UNGROUNDED_QUOTE = "ungrounded_quote"
 ISSUE_EXTRACTION_FAILED = "extraction_failed"
+ISSUE_QUOTA_EXHAUSTED = "quota_exhausted"
 
 
 @dataclass
@@ -53,6 +55,7 @@ class ExtractionSummary:
     facts_unverified: int = 0      # quote not found in the chunk
     facts_low_confidence: int = 0  # below the review threshold
     review_items: int = 0
+    quota_exhausted: bool = False
     fact_types: set[str] = field(default_factory=set)
 
     def as_dict(self) -> dict[str, object]:
@@ -65,6 +68,7 @@ class ExtractionSummary:
             "facts_unverified": self.facts_unverified,
             "facts_low_confidence": self.facts_low_confidence,
             "review_items": self.review_items,
+            "quota_exhausted": self.quota_exhausted,
             "fact_types": sorted(self.fact_types),
         }
 
@@ -204,9 +208,37 @@ def extract_document_facts(
 
     repo.set_document_status(conn, document.id, "extracting")
 
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         try:
             facts = extract_facts_from_chunk(chunk.text, client=client)
+        except QuotaExhaustedError as exc:
+            # Every remaining chunk would fail identically. Stop, and record it
+            # once with the scope of what was missed -- grinding on would just
+            # bill 24 doomed calls and fill the queue with 24 copies of the
+            # same message, which is what this replaced.
+            remaining = len(chunks) - index
+            logger.warning(
+                "daily quota exhausted; stopping extraction with %d chunk(s) left",
+                remaining,
+            )
+            summary.chunks_failed += remaining
+            repo.insert_review_item(
+                conn,
+                fact_id=None,
+                chunk_id=chunk.id,
+                issue_type=ISSUE_QUOTA_EXHAUSTED,
+                note=(
+                    f"Daily model quota exhausted after {index} of {len(chunks)} "
+                    f"chunks. {remaining} chunk(s) were not processed, so this "
+                    f"document's facts are incomplete. Re-run "
+                    f"POST /documents/{document.id}/extract once quota resets, "
+                    f"or switch GEMINI_MODEL (quotas are per model). "
+                    f"Underlying error: {str(exc)[:200]}"
+                ),
+            )
+            summary.review_items += 1
+            summary.quota_exhausted = True
+            break
         except ExtractionError as exc:
             # One chunk failing must not lose the rest of the document. Record
             # it against the chunk so the gap is visible.
@@ -238,6 +270,75 @@ def extract_document_facts(
     if replace:
         repo.resync_fact_types(conn)
 
-    status = "extracted" if summary.chunks_failed == 0 else "extracted_with_errors"
+    if summary.quota_exhausted:
+        status = "extraction_incomplete"
+    elif summary.chunks_failed:
+        status = "extracted_with_errors"
+    else:
+        status = "extracted"
     repo.set_document_status(conn, document.id, status)
     return summary
+
+
+def reground_document_facts(
+    conn: sqlite3.Connection, document: Document
+) -> dict[str, int]:
+    """Recompute page and bbox for a document's facts from their stored quotes.
+
+    Grounding is deterministic and uses no model calls, so it can be re-run
+    freely -- after a fix to the locator, or if the stored PDF is replaced.
+    Facts themselves are untouched; only their grounding columns move.
+
+    Resolves any ungrounded_quote review items that now ground, since the
+    condition that raised them no longer holds.
+    """
+    result = {"checked": 0, "regrounded": 0, "changed_page": 0, "still_ungrounded": 0}
+    pdf_path = settings.upload_path / f"{document.sha256}.pdf"
+    if not pdf_path.exists():
+        return result
+
+    rows = conn.execute(
+        "SELECT f.id, f.quote, f.page_number, f.bbox_x0, c.page_start, c.page_end "
+        "FROM facts f LEFT JOIN chunks c ON c.id = f.chunk_id "
+        "WHERE f.document_id = ? AND f.quote IS NOT NULL",
+        (document.id,),
+    ).fetchall()
+
+    for row in rows:
+        result["checked"] += 1
+        located = locate_quote_bbox(
+            pdf_path, row["quote"], row["page_start"], row["page_end"]
+        )
+        if located is None:
+            if row["bbox_x0"] is not None:
+                # It used to have a box and no longer does; clear it rather
+                # than leave a stale rectangle behind.
+                conn.execute(
+                    "UPDATE facts SET bbox_x0=NULL, bbox_y0=NULL, bbox_x1=NULL, "
+                    "bbox_y1=NULL WHERE id = ?",
+                    (row["id"],),
+                )
+            result["still_ungrounded"] += 1
+            continue
+
+        page_number, (x0, y0, x1, y1) = located
+        if page_number != row["page_number"]:
+            result["changed_page"] += 1
+        conn.execute(
+            "UPDATE facts SET page_number=?, bbox_x0=?, bbox_y0=?, bbox_x1=?, "
+            "bbox_y1=? WHERE id = ?",
+            (page_number, x0, y0, x1, y1, row["id"]),
+        )
+        result["regrounded"] += 1
+
+        conn.execute(
+            "UPDATE review_queue SET resolved = 1, "
+            "resolution_action = 'accepted', "
+            "resolution_note = 'Re-grounded: the quote now resolves to a page "
+            "and bounding box.', resolved_at = datetime('now') "
+            "WHERE fact_id = ? AND issue_type = ? AND resolved = 0",
+            (row["id"], ISSUE_UNGROUNDED_QUOTE),
+        )
+
+    logger.info("re-grounded document %s: %s", document.id, result)
+    return result

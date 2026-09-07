@@ -68,6 +68,13 @@ class DocumentUploadResponse(BaseModel):
     deduplicated: bool = Field(
         ..., description="True when this exact file had already been ingested."
     )
+    self_check: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Items the post-ingestion self-check added to the review queue, "
+            "keyed by issue type."
+        ),
+    )
     linking: "LinkingSummaryOut | None" = Field(
         None,
         description="Result of the relationship step, or null when it was skipped.",

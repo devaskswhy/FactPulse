@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # storage
     database_path: str = "factpulse.db"
     upload_dir: str = "uploads"
+    page_cache_dir: str = "page_cache"
+
+    # Pixels per PDF point when rendering a page image. 2.0 renders a US
+    # Letter page at 1224x1584, legible without being enormous.
+    page_render_scale: float = 2.0
 
     # extraction
     extract_on_upload: bool = True
@@ -61,6 +66,11 @@ class Settings(BaseSettings):
     @property
     def upload_path(self) -> Path:
         p = Path(self.upload_dir)
+        return p if p.is_absolute() else BACKEND_DIR / p
+
+    @property
+    def page_cache_path(self) -> Path:
+        p = Path(self.page_cache_dir)
         return p if p.is_absolute() else BACKEND_DIR / p
 
     @property

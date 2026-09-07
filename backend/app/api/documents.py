@@ -24,7 +24,9 @@ from app.services.ingest import EmptyPdfError, ingest_pdf, rechunk_document
 from app.services.pdf import PdfParseError
 from app.services.embed import EmbeddingError
 from app.services.link import link_document_facts
-from app.services.pipeline import extract_document_facts
+from app.services.pipeline import extract_document_facts, reground_document_facts
+from app.services.render import PageRenderError, render_page
+from app.services.selfcheck import run_self_check
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -90,6 +92,7 @@ async def upload_document(
         linking=(
             LinkingSummaryOut(**result.linking.as_dict()) if result.linking else None
         ),
+        self_check=result.self_check,
     )
 
 
@@ -219,6 +222,11 @@ def extract(
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+
+    # The fact set just changed, so re-run the checks over it. Cheap (queries
+    # only) and idempotent, so a re-extract leaves the queue consistent rather
+    # than reflecting the previous run's facts.
+    run_self_check(conn, document_id)
     return ExtractionSummaryOut(**summary.as_dict())
 
 
@@ -243,3 +251,56 @@ def link(
             status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     return LinkingSummaryOut(**summary.as_dict())
+
+
+@router.get(
+    "/{document_id}/pages/{page_number}/image",
+    response_class=FileResponse,
+    summary="Rendered PNG of one page",
+)
+def get_page_image(
+    document_id: int,
+    page_number: int,
+    conn: sqlite3.Connection = Depends(db_dependency),
+) -> FileResponse:
+    """Render a 1-based page to PNG at PAGE_RENDER_SCALE.
+
+    Cached on disk under the document hash: the source PDF is immutable and
+    content-addressed, so the image is too. Coordinates from
+    GET /facts/{id}/evidence are already in this image's pixel space.
+    """
+    document = _require_document(conn, document_id)
+    pdf_path = settings.upload_path / f"{document.sha256}.pdf"
+    try:
+        rendered = render_page(pdf_path, page_number, document.sha256)
+    except PageRenderError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return FileResponse(
+        rendered.path,
+        media_type="image/png",
+        headers={
+            # Content-addressed and scale-tagged, so it can be cached hard.
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Page-Width": str(rendered.width),
+            "X-Page-Height": str(rendered.height),
+            "X-Render-Scale": str(rendered.scale),
+        },
+    )
+
+
+@router.post(
+    "/{document_id}/reground",
+    summary="Recompute page and bbox for this document's facts",
+)
+def reground(
+    document_id: int, conn: sqlite3.Connection = Depends(db_dependency)
+) -> dict[str, int]:
+    """Re-locate every stored quote in the PDF.
+
+    Uses no model calls, so it is free to re-run -- after a change to the
+    locator, or if grounding looks wrong. Facts are untouched apart from their
+    page and bounding box.
+    """
+    document = _require_document(conn, document_id)
+    return reground_document_facts(conn, document)

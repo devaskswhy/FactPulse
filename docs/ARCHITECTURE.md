@@ -64,8 +64,9 @@ All eight steps are implemented.
     api/
       health.py        GET /health
       documents.py     upload, list, inspect, extract, link, rechunk, delete
-      facts.py         GET /facts, /facts/{id}, /facts/{id}/relationships,
+      facts.py         GET /facts, /facts/{id}, /evidence, /relationships,
                        /schema, /review
+      review.py        GET /review-queue, POST /review-queue/{id}/resolve
     schemas/           pydantic models for every request and response
     services/
       pdf.py           PyMuPDF parsing, text cleanup, storage, quote grounding
@@ -74,6 +75,8 @@ All eight steps are implemented.
       pipeline.py      verify, ground, persist, route for review
       embed.py         fact statement embeddings, packed as float32 BLOBs
       link.py          cosine retrieval + batched relationship classification
+      render.py        page PNG rendering, caching, and point->pixel scaling
+      selfcheck.py     post-ingestion queries for ambiguous or borderline facts
       ingest.py        all eight steps wired together in one transaction
   run.py               dev entrypoint
 /frontend              Next.js App Router, TypeScript, Tailwind
@@ -486,7 +489,114 @@ Quotas are **per model**, so switching `GEMINI_MODEL` gives a fresh allowance.
 
 ---
 
-## 7. Configuration
+## 7. Evidence bundles and the review queue
+
+### Evidence: coordinates the frontend can use directly
+
+`GET /facts/{id}/evidence` returns the fact, the URL of a rendered page image,
+and the highlight box **in pixels of that image** — not PDF points.
+
+PDF geometry is in points (1/72 inch) and the image is in pixels, so something
+has to convert. Doing it in the browser means shipping the render scale to
+every client and trusting each to apply it identically; doing it server-side
+means the API hands over coordinates already correct for the image it also
+serves. `render.py` owns both halves so they cannot drift apart, and the cache
+filename includes the scale — changing `PAGE_RENDER_SCALE` cannot serve a stale
+image whose pixels no longer match the coordinates.
+
+`bbox_pdf_points` is returned alongside for reference. `page_image_width` and
+`page_image_height` let a frontend that scales the image to fit scale the box
+by the same ratio.
+
+Page images are rendered on demand and cached under the document's hash. The
+source PDF is immutable and content-addressed, so the image is too, and the
+response is marked `immutable` for a year.
+
+A fact whose quote was never located is still returned, with `grounded: false`
+and a null bbox, rather than 404. An ungrounded fact is exactly what a reviewer
+needs to see.
+
+### A grounding bug worth recording
+
+The first version of `locate_quote_bbox()` looped pages outer and candidate
+strings inner: for each page, try the full quote, then progressively shorter
+leading fragments. That is wrong, and quietly so.
+
+In a report that repeats boilerplate — "Gross foreign exchange reserves were
+placed at ..." appears on 40 of 60 pages here — the five-word fallback matches
+almost everywhere, while the full quote matches exactly one page. Looping pages
+outer meant an early page's *fallback* match won before the correct page's
+*exact* match was ever attempted. The result was a highlight over the
+right-looking sentence on the wrong page, showing a different number than the
+fact claimed. 13 of 56 facts in the test document were affected.
+
+The fix is to exhaust the most specific candidate across every page before
+falling back to a shorter one — candidates outer, pages inner.
+
+`POST /documents/{id}/reground` recomputes page and bbox from stored quotes.
+Grounding is deterministic and uses no model calls, so it is free to re-run
+after a fix like this one; only the grounding columns move.
+
+### The review queue as a workflow
+
+`GET /review-queue` returns unresolved items each carrying the context needed
+to judge it without a second request: the fact with its confidence and values,
+the chunk text a failed call came from, or the two facts a relationship
+judgement was made between. Every fact-bearing entry includes an `evidence_url`.
+
+`POST /review-queue/{id}/resolve` takes `{action, resolution_note}`:
+
+| Action | Effect |
+| --- | --- |
+| `accepted` | The fact stands as extracted. |
+| `rejected` | The fact is deleted; attributes, embedding and relationships cascade. |
+| `edited` | The supplied `correction` is written onto the fact. |
+
+Grounding fields are deliberately **not** editable. Quote, page and bbox are
+derived from the document; letting a reviewer type over them would let a fact
+claim evidence the PDF does not support, which is the opposite of the point. A
+fact whose quote is wrong should be rejected, not patched.
+
+Resolving an already-resolved item is a 409 rather than a silent overwrite, so
+two reviewers cannot quietly clobber each other's decisions.
+
+Note that `rejected` removes the review row along with the fact, via the
+existing cascade. The decision is reported in the response but does not persist
+as a resolved row — there is no fact left for it to describe.
+
+### The self-check
+
+Extraction catches quotes that do not verify and confidence below the review
+threshold. Two quieter problems have no single step positioned to notice them,
+so a pass runs over the finished document:
+
+| Issue | Rule |
+| --- | --- |
+| `ambiguous_unit` | `normalized_value` is numeric but `unit` is empty |
+| `borderline_confidence` | confidence in [0.50, 0.70) |
+
+Both are queries over what was written — no model calls, so the step is free
+and runs unconditionally, including when extraction was skipped.
+
+`ambiguous_unit` deliberately excludes ISO dates and bare years: those are
+numeric in form but complete without a unit, and flagging them would fill the
+queue with noise nobody can action.
+
+This is the check that earns its place in practice. In the 60-page test report
+it flagged 13 facts, and the cause was real: `Table 12. State-wise gross
+capital formation` omits the `(Rs. crore)` that its sibling tables carry, so
+the model extracted `32,507.0` with nothing to interpret it by. The number is
+correct and useless — precisely a case for a human, and precisely what
+`edited` exists to fix.
+
+`borderline_confidence` overlaps with `low_confidence` at the current 0.9
+threshold, since anything in [0.5, 0.7) is also below 0.9. Both fire; the
+borderline label is the more specific signal. Lowering
+`REVIEW_CONFIDENCE_THRESHOLD` below 0.7 separates them.
+
+---
+
+## 8. Configuration
 
 `backend/.env` (see `backend/.env.example`; `.env` is gitignored):
 
@@ -507,7 +617,7 @@ throughout).
 
 ---
 
-## 8. Current status
+## 9. Current status
 
 All eight pipeline steps are implemented: ingest, parse, chunk, extract,
 ground, embed, link, review.
@@ -522,7 +632,10 @@ ground, embed, link, review.
   and enough of the other fact and its source to render a comparison in one
   request
 - `GET /schema` — the fact_types registry, the vocabulary the corpus produced
-- `GET /review` — the review queue
+- `GET /review-queue` — the review queue with full context, and
+  `POST /review-queue/{id}/resolve` to accept, reject, or edit
+- `GET /facts/{id}/evidence` — page image plus a pixel-space highlight box
+- `GET /documents/{id}/pages/{n}/image` — rendered, cached page PNG
 - `POST /documents/{id}/extract` and `/link` — re-run either step
 - Document CRUD, chunk listing, original-PDF download, rechunk
 - `GET /health` — liveness, schema state, Gemini key presence

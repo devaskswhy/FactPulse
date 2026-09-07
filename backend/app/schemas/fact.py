@@ -111,6 +111,13 @@ class ExtractionSummaryOut(BaseModel):
         ..., ge=0, description="Facts below the review confidence threshold."
     )
     review_items: int = Field(..., ge=0, description="Rows added to review_queue.")
+    quota_exhausted: bool = Field(
+        False,
+        description=(
+            "True when the run stopped early because the daily model quota "
+            "was spent; the document's facts are incomplete."
+        ),
+    )
     fact_types: list[str] = Field(
         default_factory=list,
         description="Distinct fact_type labels the model invented in this run.",
@@ -132,3 +139,63 @@ class SchemaResponse(BaseModel):
 class ReviewList(BaseModel):
     total: int = Field(..., ge=0)
     items: list[ReviewItem] = Field(default_factory=list)
+
+
+class PixelBBox(BaseModel):
+    """A box in PIXELS of the rendered page image, not PDF points.
+
+    Already scaled by the server so the frontend can draw it directly over the
+    image from `page_image_url` with no conversion.
+    """
+
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    @property
+    def width(self) -> float:
+        return self.x1 - self.x0
+
+    @property
+    def height(self) -> float:
+        return self.y1 - self.y0
+
+
+class EvidenceBundle(BaseModel):
+    """Everything needed to show "this fact came from exactly here".
+
+    bbox is in image pixels and page_image_width/height give the image it
+    belongs to, so a frontend that scales the image to fit can scale the box by
+    the same ratio.
+    """
+
+    fact: Fact
+    page_image_url: str = Field(
+        ..., description="URL of the rendered page PNG this bbox applies to."
+    )
+    page_image_width: int = Field(..., description="Rendered image width in pixels.")
+    page_image_height: int = Field(..., description="Rendered image height in pixels.")
+    render_scale: float = Field(
+        ..., description="Pixels per PDF point used to render the page."
+    )
+    bbox: PixelBBox | None = Field(
+        None,
+        description=(
+            "Highlight region in image pixels. Null when the quote could not be "
+            "located in the PDF -- the fact is still returned, ungrounded."
+        ),
+    )
+    bbox_pdf_points: BBox | None = Field(
+        None, description="The same box in raw PDF points, for reference."
+    )
+    quote: str | None = Field(None, description="The verbatim source text.")
+    document_id: int
+    document_title: str | None = None
+    document_filename: str
+    page_number: int | None = Field(
+        None, description="1-based page the quote appears on."
+    )
+    grounded: bool = Field(
+        ..., description="True when a real bounding box was located for the quote."
+    )

@@ -9,7 +9,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import documents_router, facts_router, health_router
+from app.api import (
+    documents_router,
+    facts_router,
+    health_router,
+    review_router,
+)
 from app.core.config import settings
 from app.db.database import init_db
 
@@ -19,6 +24,7 @@ async def lifespan(app: FastAPI):
     # Apply schema.sql on boot. Idempotent, so it is safe on every start.
     init_db()
     settings.upload_path.mkdir(parents=True, exist_ok=True)
+    settings.page_cache_path.mkdir(parents=True, exist_ok=True)
     yield
 
 
@@ -40,6 +46,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(documents_router)
 app.include_router(facts_router)
+app.include_router(review_router)
 
 
 @app.get("/", tags=["system"], summary="Service banner")

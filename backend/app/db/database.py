@@ -48,7 +48,38 @@ def init_db(db_path: Path | str | None = None) -> Path:
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     with get_conn(path) as conn:
         conn.executescript(sql)
+    migrate(path)
     return path
+
+
+# Columns added to existing tables after the first release. schema.sql covers
+# fresh databases; this covers ones already on disk. Keyed by table, each entry
+# is (column, DDL type). Adding a nullable column is the only migration shape
+# supported here -- anything more involved deserves a real migration tool.
+_ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "review_queue": [
+        ("resolution_action", "TEXT"),
+        ("resolution_note", "TEXT"),
+        ("resolved_at", "TEXT"),
+    ],
+}
+
+
+def migrate(db_path: Path | str | None = None) -> list[str]:
+    """Add columns missing from an existing database. Idempotent."""
+    applied: list[str] = []
+    with get_conn(db_path) as conn:
+        for table, columns in _ADDED_COLUMNS.items():
+            existing = {
+                row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            if not existing:
+                continue  # table not created yet; schema.sql will handle it
+            for name, ddl in columns:
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                    applied.append(f"{table}.{name}")
+    return applied
 
 
 def table_names(db_path: Path | str | None = None) -> list[str]:

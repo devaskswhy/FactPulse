@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.core.config import settings
 from app.db import repository as repo
@@ -27,6 +27,7 @@ from app.services.extract import ExtractionError
 from app.services.pdf import PdfParseError, parse_pdf, sha256_bytes, store_pdf
 from app.services.link import LinkingSummary, link_document_facts
 from app.services.pipeline import ExtractionSummary, extract_document_facts
+from app.services.selfcheck import run_self_check
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class IngestResult:
     deduplicated: bool  # True when this file was already ingested
     extraction: ExtractionSummary | None = None  # None when extraction was skipped
     linking: LinkingSummary | None = None        # None when linking was skipped
+    self_check: dict[str, int] = field(default_factory=dict)  # queued by issue type
 
 
 def ingest_pdf(
@@ -109,6 +111,11 @@ def ingest_pdf(
     # before it is worth comparing anything against the corpus.
     linking = _maybe_link(conn, document, extraction=extraction)
 
+    # Systematic pass over what was written, once the document is complete.
+    # Pure queries, no model calls, so it costs nothing and runs unconditionally
+    # -- including when extraction was skipped, where it simply finds nothing.
+    self_check = run_self_check(conn, document_id)
+
     # Re-read: extraction advances the document's status.
     document = repo.get_document(conn, document_id) or document
     return IngestResult(
@@ -117,6 +124,7 @@ def ingest_pdf(
         deduplicated=False,
         extraction=extraction,
         linking=linking,
+        self_check=self_check,
     )
 
 

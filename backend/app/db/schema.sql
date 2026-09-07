@@ -142,7 +142,12 @@ CREATE TABLE IF NOT EXISTS review_queue (
     issue_type TEXT    NOT NULL,
     note       TEXT,
     resolved   INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    -- Outcome of human review. Added once the queue became a real workflow
+    -- rather than a log; see migrate() in database.py for existing databases.
+    resolution_action TEXT,     -- accepted | rejected | edited
+    resolution_note   TEXT,
+    resolved_at       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_review_queue_resolved ON review_queue(resolved);

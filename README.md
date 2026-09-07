@@ -67,6 +67,11 @@ The schema is applied automatically on startup; `init_db()` is idempotent.
 | `GET /facts/{id}` | One fact with its grounding and EAV attributes |
 | `GET /schema` | The `fact_types` registry: labels the model invented |
 | `GET /facts/{id}/relationships` | Related facts with verdict and rationale |
+| `GET /facts/{id}/evidence` | Page image URL + highlight box, in image pixels |
+| `GET /documents/{id}/pages/{n}/image` | Rendered page PNG (cached) |
+| `POST /documents/{id}/reground` | Recompute page/bbox from stored quotes (free) |
+| `GET /review-queue` | Unresolved items with full context |
+| `POST /review-queue/{id}/resolve` | accepted / rejected / edited |
 | `POST /documents/{id}/link` | Run or re-run the relationship engine |
 | `GET /review` | The review queue: facts the pipeline flagged |
 | `GET /health` | Liveness, schema state, whether a Gemini key is set |
@@ -154,3 +159,43 @@ curl http://127.0.0.1:8000/facts/1/relationships
 
 Each entry carries the related fact, its document, page, quote and the
 rationale, so a comparison view renders without a second request.
+
+### Evidence grounding
+
+`GET /facts/{id}/evidence` returns the highlight box already scaled to the
+pixels of the page image it also links, so the frontend draws it directly:
+
+```json
+{
+  "page_image_url": "/documents/3/pages/8/image",
+  "page_image_width": 1190, "page_image_height": 1684, "render_scale": 2.0,
+  "bbox": { "x0": 100.0, "y0": 494.04, "x1": 663.62, "y1": 551.06 },
+  "quote": "Gross foreign exchange reserves were placed at 668 at the end...",
+  "page_number": 8, "grounded": true
+}
+```
+
+Pages are rendered on demand and cached by document hash.
+
+### The review queue
+
+Nothing doubtful is discarded. Facts that fail a check are stored *and* queued:
+
+| Issue type | Meaning |
+| --- | --- |
+| `unverified_quote` | Quote is not a substring of the source chunk |
+| `ungrounded_quote` | Quote verified but not locatable in the PDF |
+| `low_confidence` | Below `REVIEW_CONFIDENCE_THRESHOLD` |
+| `ambiguous_unit` | Numeric value with no unit — the number is uninterpretable |
+| `borderline_confidence` | Confidence in the 0.50–0.70 band |
+| `extraction_failed` | The model call failed for that chunk |
+| `quota_exhausted` | Daily model quota spent; the document is incomplete |
+
+```bash
+curl http://127.0.0.1:8000/review-queue
+curl -X POST http://127.0.0.1:8000/review-queue/40/resolve   -H 'Content-Type: application/json'   -d '{"action":"edited","resolution_note":"Unit is Rs. crore per the table heading convention","correction":{"unit":"Rs. crore"}}'
+```
+
+`rejected` deletes the fact; `edited` writes corrections back. Grounding fields
+(quote, page, bbox) are **not** editable — a fact whose quote is wrong should be
+rejected, not patched into claiming evidence the PDF does not support.

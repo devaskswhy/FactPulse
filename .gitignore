@@ -13,6 +13,7 @@ factpulse.db-wal
 
 # ---- uploaded / derived artifacts ---------------------------------------
 backend/uploads/
+backend/page_cache/
 backend/storage/
 
 # ---- python --------------------------------------------------------------

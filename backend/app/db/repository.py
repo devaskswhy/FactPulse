@@ -591,3 +591,160 @@ def get_fact_context(conn: sqlite3.Connection, fact_id: int) -> sqlite3.Row | No
         "FROM facts f JOIN documents d ON d.id = f.document_id WHERE f.id = ?",
         (fact_id,),
     ).fetchone()
+
+
+# ------------------------------------------------- review queue (with context)
+
+
+def list_review_rows(
+    conn: sqlite3.Connection,
+    *,
+    resolved: bool | None = False,
+    issue_type: str | None = None,
+    document_id: int | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[sqlite3.Row]:
+    """Review items joined with their fact, chunk and source documents.
+
+    One query rather than N+1: the queue view needs the fact or the chunk text
+    behind every row, and fetching those per row would make an unusable page.
+    LEFT JOINs throughout because an item may reference a fact, a chunk, or
+    neither.
+    """
+    clauses: list[str] = []
+    params: dict[str, object] = {"limit": limit, "offset": offset}
+    if resolved is not None:
+        clauses.append("q.resolved = :resolved")
+        params["resolved"] = 1 if resolved else 0
+    if issue_type:
+        clauses.append("q.issue_type = :issue_type")
+        params["issue_type"] = issue_type
+    if document_id is not None:
+        clauses.append("COALESCE(fd.id, cd.id) = :document_id")
+        params["document_id"] = document_id
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    return conn.execute(
+        f"""
+        SELECT
+            q.id, q.issue_type, q.note, q.resolved, q.created_at,
+            q.resolution_action, q.resolution_note, q.resolved_at,
+            q.fact_id, q.chunk_id,
+
+            f.fact_type, f.subject, f.statement, f.normalized_value, f.unit,
+            f.time_scope, f.confidence, f.quote, f.page_number,
+            f.document_id      AS fact_document_id,
+            fd.title           AS fact_document_title,
+
+            c.page_start, c.page_end,
+            SUBSTR(c.text, 1, 600) AS chunk_excerpt,
+            c.document_id      AS chunk_document_id,
+            cd.title           AS chunk_document_title
+        FROM review_queue q
+        LEFT JOIN facts     f  ON f.id  = q.fact_id
+        LEFT JOIN documents fd ON fd.id = f.document_id
+        LEFT JOIN chunks    c  ON c.id  = q.chunk_id
+        LEFT JOIN documents cd ON cd.id = c.document_id
+        {where}
+        ORDER BY q.resolved, q.id
+        LIMIT :limit OFFSET :offset
+        """,
+        params,
+    ).fetchall()
+
+
+def review_counts_by_issue(
+    conn: sqlite3.Connection, *, resolved: bool | None = False
+) -> dict[str, int]:
+    where = "" if resolved is None else " WHERE resolved = ?"
+    params: tuple = () if resolved is None else (1 if resolved else 0,)
+    rows = conn.execute(
+        f"SELECT issue_type, COUNT(*) AS n FROM review_queue{where} "
+        f"GROUP BY issue_type ORDER BY n DESC",
+        params,
+    ).fetchall()
+    return {r["issue_type"]: r["n"] for r in rows}
+
+
+def get_review_row(conn: sqlite3.Connection, item_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM review_queue WHERE id = ?", (item_id,)
+    ).fetchone()
+
+
+def resolve_review_item(
+    conn: sqlite3.Connection,
+    item_id: int,
+    *,
+    action: str,
+    resolution_note: str,
+) -> bool:
+    cur = conn.execute(
+        "UPDATE review_queue SET resolved = 1, resolution_action = ?, "
+        "resolution_note = ?, resolved_at = datetime('now') WHERE id = ?",
+        (action, resolution_note, item_id),
+    )
+    return cur.rowcount > 0
+
+
+def update_fact_fields(
+    conn: sqlite3.Connection, fact_id: int, fields: dict[str, object]
+) -> list[str]:
+    """Write corrected values onto a fact.
+
+    Only columns a human can sensibly correct are writable: grounding
+    (quote/page/bbox) is derived from the document and must not be hand-edited,
+    or the fact would claim evidence it does not have.
+    """
+    allowed = {
+        "fact_type",
+        "subject",
+        "statement",
+        "normalized_value",
+        "unit",
+        "time_scope",
+        "confidence",
+    }
+    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not updates:
+        return []
+
+    assignments = ", ".join(f"{k} = ?" for k in updates)
+    conn.execute(
+        f"UPDATE facts SET {assignments} WHERE id = ?",
+        (*updates.values(), fact_id),
+    )
+    return sorted(updates)
+
+
+def delete_fact(conn: sqlite3.Connection, fact_id: int) -> bool:
+    """Remove a fact rejected in review. Attributes, embedding and
+    relationships cascade; other review rows on the same fact go with it."""
+    cur = conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+    return cur.rowcount > 0
+
+
+def find_relationship_for_fact(
+    conn: sqlite3.Connection, fact_id: int
+) -> sqlite3.Row | None:
+    """The first relationship touching a fact, joined with the other end.
+
+    Used to give a relationship-related queue item its two-sided context.
+    """
+    return conn.execute(
+        """
+        SELECT
+            r.id AS relationship_id, r.relationship_type, r.rationale,
+            f.id AS other_fact_id, f.fact_type, f.subject, f.statement,
+            f.normalized_value, f.unit, f.time_scope, f.confidence,
+            f.quote, f.page_number, f.document_id, d.title AS document_title
+        FROM relationships r
+        JOIN facts f
+          ON f.id = CASE WHEN r.fact_id_a = :fid THEN r.fact_id_b ELSE r.fact_id_a END
+        JOIN documents d ON d.id = f.document_id
+        WHERE r.fact_id_a = :fid OR r.fact_id_b = :fid
+        ORDER BY r.id LIMIT 1
+        """,
+        {"fid": fact_id},
+    ).fetchone()

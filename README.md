@@ -11,7 +11,21 @@ context — time period, scope, or units.
 > to show you the page and rectangle each claim came from.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data model and the
-reasoning behind it.
+reasoning behind it, [docs/DEMO_CASES.md](docs/DEMO_CASES.md) for the four
+worked cases with fact IDs, and [docs/FAILURE_CASE.md](docs/FAILURE_CASE.md)
+for a write-up of what the system got wrong and why.
+
+## The four cases
+
+All reproducible in the running app against the committed corpus, none
+hardcoded anywhere in the pipeline:
+
+| Case | Example |
+| --- | --- |
+| **Corroborates** | RBI and the IMF both report FY2024-25 headline inflation at 4.6%, in wording that shares almost no phrasing |
+| **Contradicts** | RBI says global growth was 3.5% in 2023; the Economic Survey says 3.3%. Same metric, same period, different WEO vintages — and neither document says so |
+| **Reconciled** | RBI's *actual* 3.3% global growth for 2024 vs the Survey's IMF *projection* of 3.2% for the same year — reconciled by definition, not by period |
+| **Failure** | A waste-intensity figure of 23.3 extracted correctly with no unit, because the table never states one. Caught by the self-check, not discarded |
 
 ## Status
 

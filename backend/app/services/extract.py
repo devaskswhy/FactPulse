@@ -35,14 +35,30 @@ logger = logging.getLogger(__name__)
 # quota and delays the real error.
 _RETRYABLE_MARKERS = ("503", "429", "500", "502", "504", "UNAVAILABLE", "RESOURCE_EXHAUSTED")
 
+# A 429 is only worth retrying when it is a per-minute rate limit. A *daily*
+# quota will not clear within any backoff window we would sit through, so
+# retrying one just burns four attempts and ~30 seconds before failing anyway.
+# Gemini names the quota in the error body, which is how the two are told apart.
+_NON_RETRYABLE_QUOTA_MARKERS = ("PerDay", "PerDayPerProject", "GenerateRequestsPerDay")
+
 
 class ExtractionError(RuntimeError):
     """The model call failed or returned something unusable."""
 
 
+class QuotaExhaustedError(ExtractionError):
+    """A daily quota is spent. Retrying will not help until it resets."""
+
+
 def _is_retryable(exc: Exception) -> bool:
     text = str(exc)
+    if any(marker in text for marker in _NON_RETRYABLE_QUOTA_MARKERS):
+        return False
     return any(marker in text for marker in _RETRYABLE_MARKERS)
+
+
+def _is_daily_quota(exc: Exception) -> bool:
+    return any(marker in str(exc) for marker in _NON_RETRYABLE_QUOTA_MARKERS)
 
 
 @dataclass
@@ -271,6 +287,10 @@ def extract_facts_from_chunk(
             break
         except Exception as exc:
             last = exc
+            if _is_daily_quota(exc):
+                raise QuotaExhaustedError(
+                    f"daily Gemini quota exhausted for {settings.gemini_model}: {exc}"
+                ) from exc
             if attempt == attempts - 1 or not _is_retryable(exc):
                 raise ExtractionError(f"Gemini call failed: {exc}") from exc
             delay = min(2.0 * (2**attempt), 30.0) + random.uniform(0, 1.0)

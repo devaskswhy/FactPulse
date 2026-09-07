@@ -1,0 +1,537 @@
+"""Pipeline step 7: relate new facts to what the knowledge layer already holds.
+
+Runs as a batch at the end of a document's ingestion. For each new fact:
+
+  1. retrieve similar facts from *other* documents by cosine similarity
+  2. ask Gemini to judge each candidate pair
+  3. store everything except UNRELATED
+
+Two things keep the model call count sane. Cosine pre-filtering replaces an
+all-pairs comparison with O(n*m) cheap float operations plus a capped shortlist
+per fact. Batching then judges that whole shortlist in ONE call, so the cost is
+one model call per fact rather than one per pair -- the difference between
+21 calls and 3 on a two-document corpus, which matters immediately on a
+free-tier daily quota.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import random
+import sqlite3
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+from google import genai
+from google.genai import types
+
+from app.core.config import settings
+from app.db import repository as repo
+from app.services.embed import (
+    EmbeddingError,
+    cosine_against_matrix,
+    embed_texts,
+    pack_vector,
+    unpack_vector,
+)
+from app.services.extract import (
+    ExtractionError,
+    QuotaExhaustedError,
+    _is_daily_quota,
+    _is_retryable,
+    build_client,
+)
+
+logger = logging.getLogger(__name__)
+
+# Tuning knobs for candidate retrieval.
+#
+# SIMILARITY_THRESHOLD trades model calls against recall: too high and a real
+# contradiction phrased differently never reaches the classifier; too low and
+# the classifier spends its budget rejecting unrelated pairs. 0.75 is a
+# starting point measured on this corpus, not a derived constant.
+SIMILARITY_THRESHOLD = 0.75
+TOP_K = 8
+
+# Relationship labels the classifier chooses between. Unlike fact_type, this IS
+# a closed set: the four categories are the product's own vocabulary, they are
+# what the UI renders, and a model inventing a fifth would silently break that
+# rendering. The database column stays free text so the set can grow later
+# without a migration -- the constraint lives here, at the point of decision,
+# not in the schema.
+CORROBORATES = "corroborates"
+CONTRADICTS = "contradicts"
+RECONCILED = "reconciled"
+UNRELATED = "unrelated"
+
+RELATIONSHIP_TYPES = (CORROBORATES, CONTRADICTS, RECONCILED, UNRELATED)
+
+
+@dataclass
+class LinkingSummary:
+    document_id: int
+    facts_embedded: int = 0
+    facts_compared: int = 0
+    pairs_evaluated: int = 0
+    relationships_created: int = 0
+    by_type: dict[str, int] = field(default_factory=dict)
+    errors: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "document_id": self.document_id,
+            "facts_embedded": self.facts_embedded,
+            "facts_compared": self.facts_compared,
+            "pairs_evaluated": self.pairs_evaluated,
+            "relationships_created": self.relationships_created,
+            "by_type": dict(sorted(self.by_type.items())),
+            "errors": self.errors,
+        }
+
+
+# ------------------------------------------------------------------ embedding
+
+
+def embed_document_facts(
+    conn: sqlite3.Connection, document_id: int, client: genai.Client | None = None
+) -> int:
+    """Embed every fact of a document that does not have a vector yet."""
+    facts = repo.list_facts(conn, document_id=document_id, limit=10_000)
+    pending = [f for f in facts if repo.get_embedding(conn, f.id) is None]
+    if not pending:
+        return 0
+
+    vectors = embed_texts([f.statement for f in pending], client=client)
+    for fact, vector in zip(pending, vectors):
+        repo.upsert_embedding(conn, fact.id, pack_vector(vector), int(vector.size))
+    return len(pending)
+
+
+# ------------------------------------------------------------------ retrieval
+
+
+def find_candidates(
+    conn: sqlite3.Connection,
+    fact_id: int,
+    document_id: int,
+    query_vector: np.ndarray,
+    *,
+    threshold: float = SIMILARITY_THRESHOLD,
+    top_k: int = TOP_K,
+) -> list[tuple[int, float]]:
+    """Top-k most similar facts from other documents, above `threshold`.
+
+    Brute force: every candidate embedding is loaded into one numpy matrix and
+    scored with a single vectorized dot product. That is O(n) per new fact in
+    both time and memory.
+
+    This is deliberate and appropriate at the hundreds-to-low-thousands scale
+    this system targets -- at 1k facts by 768 float32 dims the whole matrix is
+    ~3 MB and the multiply is sub-millisecond, so an index would add operational
+    weight for no measurable gain. It stops being appropriate somewhere in the
+    high tens of thousands, when the load-everything-per-fact pattern starts to
+    dominate. FAISS (in-process), pgvector (if the store moves to Postgres), or
+    Qdrant (standalone) are the natural upgrade paths; `embeddings` is the only
+    table that would need to change, and this function is the only caller.
+    """
+    rows = repo.load_candidate_embeddings(conn, exclude_document_id=document_id)
+    if not rows:
+        return []
+
+    ids: list[int] = []
+    vectors: list[np.ndarray] = []
+    for row in rows:
+        try:
+            vector = unpack_vector(row["vector"], row["dim"])
+        except EmbeddingError as exc:
+            # A vector written at a different width than the current model
+            # produces. Skip it rather than failing the whole comparison.
+            logger.warning("skipping fact %s: %s", row["fact_id"], exc)
+            continue
+        if vector.size != query_vector.size:
+            logger.warning(
+                "skipping fact %s: dim %d != query dim %d",
+                row["fact_id"], vector.size, query_vector.size,
+            )
+            continue
+        ids.append(row["fact_id"])
+        vectors.append(vector)
+
+    if not vectors:
+        return []
+
+    matrix = np.vstack(vectors)
+    scores = cosine_against_matrix(query_vector, matrix)
+
+    order = np.argsort(-scores)[:top_k]
+    return [
+        (ids[i], float(scores[i])) for i in order if float(scores[i]) >= threshold
+    ]
+
+
+# ----------------------------------------------------------------- classifier
+
+
+def _classification_schema() -> types.Schema:
+    """One verdict per candidate, returned in a single call.
+
+    Judging each pair in its own request cost one model call per pair, which at
+    top-k candidates per fact is k calls per fact -- enough to exhaust a daily
+    free-tier quota on a two-document corpus. Since every candidate is being
+    compared against the *same* fact A, they can share one request: the model
+    sees A once and returns a verdict per candidate. That turns O(facts x k)
+    calls into O(facts), and gives the model all the candidates at once, which
+    helps it pick the closest match rather than judging each in isolation.
+    """
+    return types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "verdicts": types.Schema(
+                type=types.Type.ARRAY,
+                description="Exactly one verdict per candidate, in the order given.",
+                items=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "candidate_index": types.Schema(
+                            type=types.Type.INTEGER,
+                            description="The 1-based index of the candidate judged.",
+                        ),
+                        "relationship_type": types.Schema(
+                            type=types.Type.STRING,
+                            enum=list(RELATIONSHIP_TYPES),
+                            description="How Fact A relates to this candidate.",
+                        ),
+                        "rationale": types.Schema(
+                            type=types.Type.STRING,
+                            description=(
+                                "Why, citing the specific values, periods, units "
+                                "or wording from BOTH facts that drove the "
+                                "decision. Must be concrete and checkable. For "
+                                "'reconciled' it must name the exact difference "
+                                "that explains the apparent conflict."
+                            ),
+                        ),
+                        "reconciling_dimension": types.Schema(
+                            type=types.Type.STRING,
+                            nullable=True,
+                            description=(
+                                "For 'reconciled' only: which axis explains the "
+                                "difference -- time period, scope, unit, "
+                                "definition, or basis. Null otherwise."
+                            ),
+                        ),
+                        "confidence": types.Schema(
+                            type=types.Type.NUMBER,
+                            description="Confidence in this judgement, 0 to 1.",
+                        ),
+                    },
+                    required=[
+                        "candidate_index",
+                        "relationship_type",
+                        "rationale",
+                        "confidence",
+                    ],
+                ),
+            )
+        },
+        required=["verdicts"],
+    )
+
+
+CLASSIFIER_SYSTEM = """You compare one fact against several candidate facts from other documents and decide how each relates to it.
+
+For each candidate choose exactly one:
+
+  corroborates - The two facts assert the same underlying thing. Wording may
+                 differ and values may be compatible (rounding, or one more
+                 precise than the other). They agree.
+
+  contradicts  - The two facts genuinely conflict. They cannot both be true of
+                 the same subject under the same scope, period, unit and
+                 definition. Only use this when you have checked that the scope
+                 and period really are the same.
+
+  reconciled   - They look like a conflict at first glance, but the difference
+                 is fully explained by something concrete: a different time
+                 period, a different scope (segment vs consolidated, one
+                 country vs a region), a different unit, or a different
+                 definition or accounting basis. You must name that difference.
+
+  unrelated    - They are about different things, or share only a topic. Two
+                 facts both mentioning revenue are not related unless they are
+                 about the same revenue. Most candidates will be unrelated;
+                 say so rather than forcing a connection.
+
+The rationale is shown to a human as the explanation for the verdict, so it
+must be concrete and checkable. Quote or name the actual values, periods, units
+and words from BOTH facts that drove your decision.
+
+  Not acceptable: "both facts discuss revenue"
+  Acceptable:     "Fact A gives FY2024 consolidated revenue of 4.2 USD million
+                   on a GAAP basis; candidate 2 gives CY2024 revenue of 5.1 USD
+                   million on a non-GAAP basis including the Nordics
+                   acquisition. Different period and different basis, so these
+                   do not conflict."
+
+Be conservative about 'contradicts'. If a difference in period, scope, unit or
+basis could explain the gap, it is 'reconciled', not a contradiction. If the
+two facts are simply about different things, it is 'unrelated'.
+
+Return exactly one verdict per candidate, using the candidate's given index.
+"""
+
+FACT_A_TEMPLATE = """Fact A (from "{doc_a}"):
+  statement        : {stmt_a}
+  subject          : {subj_a}
+  normalized_value : {val_a}
+  unit             : {unit_a}
+  time_scope       : {time_a}
+  source quote     : {quote_a}
+"""
+
+CANDIDATE_TEMPLATE = """
+Candidate {index} (from "{doc_b}"):
+  statement        : {stmt_b}
+  subject          : {subj_b}
+  normalized_value : {val_b}
+  unit             : {unit_b}
+  time_scope       : {time_b}
+  source quote     : {quote_b}
+"""
+
+
+def _fmt(value: object) -> str:
+    return "(not stated)" if value is None or value == "" else str(value)
+
+
+def _render_request(row_a: sqlite3.Row, candidates: list[sqlite3.Row]) -> str:
+    parts = [
+        FACT_A_TEMPLATE.format(
+            doc_a=_fmt(row_a["document_title"] or row_a["document_filename"]),
+            stmt_a=_fmt(row_a["statement"]),
+            subj_a=_fmt(row_a["subject"]),
+            val_a=_fmt(row_a["normalized_value"]),
+            unit_a=_fmt(row_a["unit"]),
+            time_a=_fmt(row_a["time_scope"]),
+            quote_a=_fmt(row_a["quote"]),
+        )
+    ]
+    for index, row_b in enumerate(candidates, start=1):
+        parts.append(
+            CANDIDATE_TEMPLATE.format(
+                index=index,
+                doc_b=_fmt(row_b["document_title"] or row_b["document_filename"]),
+                stmt_b=_fmt(row_b["statement"]),
+                subj_b=_fmt(row_b["subject"]),
+                val_b=_fmt(row_b["normalized_value"]),
+                unit_b=_fmt(row_b["unit"]),
+                time_b=_fmt(row_b["time_scope"]),
+                quote_b=_fmt(row_b["quote"]),
+            )
+        )
+    parts.append(
+        f"\nHow does Fact A relate to each of the {len(candidates)} candidates?"
+    )
+    return "".join(parts)
+
+
+def classify_candidates(
+    row_a: sqlite3.Row,
+    candidates: list[sqlite3.Row],
+    client: genai.Client | None = None,
+) -> dict[int, dict[str, object]]:
+    """Judge every candidate against fact A in one model call.
+
+    Returns {candidate_index (0-based) -> verdict}. A candidate the model omits
+    simply has no entry, and the caller skips it rather than inventing a
+    verdict for it.
+    """
+    if not candidates:
+        return {}
+
+    client = client or build_client()
+    config = types.GenerateContentConfig(
+        system_instruction=CLASSIFIER_SYSTEM,
+        response_mime_type="application/json",
+        response_schema=_classification_schema(),
+        temperature=0.0,  # a judgement, not a generation
+    )
+
+    attempts = max(1, settings.extraction_max_attempts)
+    for attempt in range(attempts):
+        try:
+            response = client.models.generate_content(
+                model=settings.gemini_model,
+                contents=_render_request(row_a, candidates),
+                config=config,
+            )
+            break
+        except Exception as exc:
+            if _is_daily_quota(exc):
+                raise QuotaExhaustedError(
+                    f"daily Gemini quota exhausted for {settings.gemini_model}: {exc}"
+                ) from exc
+            if attempt == attempts - 1 or not _is_retryable(exc):
+                raise ExtractionError(f"classification failed: {exc}") from exc
+            delay = min(2.0 * (2**attempt), 30.0) + random.uniform(0, 1.0)
+            logger.warning("retryable classifier error, sleeping %.1fs", delay)
+            time.sleep(delay)
+
+    payload = getattr(response, "text", None)
+    if not payload:
+        raise ExtractionError("classifier returned an empty response")
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ExtractionError(f"classifier response was not JSON: {exc}") from exc
+
+    raw = data.get("verdicts") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        raise ExtractionError("classifier response had no verdicts array")
+
+    results: dict[int, dict[str, object]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            # The model indexes from 1, as the prompt asks; store 0-based.
+            position = int(item.get("candidate_index")) - 1
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= position < len(candidates):
+            logger.warning("classifier returned out-of-range index %s", position + 1)
+            continue
+
+        kind = str(item.get("relationship_type") or "").strip().lower()
+        if kind not in RELATIONSHIP_TYPES:
+            logger.warning("classifier returned unknown type %r", kind)
+            continue
+
+        try:
+            confidence = min(1.0, max(0.0, float(item.get("confidence"))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        results[position] = {
+            "relationship_type": kind,
+            "rationale": str(item.get("rationale") or "").strip(),
+            "reconciling_dimension": item.get("reconciling_dimension"),
+            "confidence": confidence,
+        }
+
+    return results
+
+
+# ------------------------------------------------------------------- the step
+
+
+def link_document_facts(
+    conn: sqlite3.Connection, document_id: int
+) -> LinkingSummary:
+    """Embed a document's facts and relate them to the rest of the corpus.
+
+    One model call per fact, not per pair: all of a fact's candidates are
+    judged together. See _classification_schema for why.
+    """
+    summary = LinkingSummary(document_id=document_id)
+    client = build_client()
+
+    summary.facts_embedded = embed_document_facts(conn, document_id, client=client)
+
+    facts = repo.list_facts(conn, document_id=document_id, limit=10_000)
+    for fact in facts:
+        stored = repo.get_embedding(conn, fact.id)
+        if stored is None:
+            continue
+        query = unpack_vector(stored[0], stored[1])
+
+        scored = find_candidates(conn, fact.id, document_id, query)
+        # Drop pairs already judged on an earlier run, so a re-run costs
+        # nothing for work already done.
+        scored = [
+            (other_id, score)
+            for other_id, score in scored
+            if not repo.relationship_exists(conn, fact.id, other_id)
+        ]
+        if not scored:
+            continue
+
+        row_a = repo.get_fact_context(conn, fact.id)
+        if row_a is None:
+            continue
+
+        candidate_rows = []
+        candidate_ids = []
+        candidate_scores = []
+        for other_id, score in scored:
+            row_b = repo.get_fact_context(conn, other_id)
+            if row_b is None:
+                continue
+            candidate_rows.append(row_b)
+            candidate_ids.append(other_id)
+            candidate_scores.append(score)
+
+        if not candidate_rows:
+            continue
+
+        summary.facts_compared += 1
+        summary.pairs_evaluated += len(candidate_rows)
+
+        try:
+            verdicts = classify_candidates(row_a, candidate_rows, client=client)
+        except QuotaExhaustedError:
+            # Every remaining call would fail the same way. Stop and report
+            # what was linked rather than grinding through the rest.
+            logger.warning("daily quota exhausted; stopping linking early")
+            summary.errors += len(candidate_rows)
+            break
+        except ExtractionError as exc:
+            logger.warning("classification failed for fact %s: %s", fact.id, exc)
+            summary.errors += len(candidate_rows)
+            continue
+
+        for position, other_id in enumerate(candidate_ids):
+            verdict = verdicts.get(position)
+            if verdict is None:
+                # The model returned no verdict for this candidate. Skipping is
+                # safer than defaulting: guessing 'unrelated' would silently
+                # bury a pair, and guessing anything else would invent a claim.
+                logger.warning(
+                    "no verdict for fact %s vs %s", fact.id, other_id
+                )
+                summary.errors += 1
+                continue
+
+            kind = str(verdict["relationship_type"])
+            summary.by_type[kind] = summary.by_type.get(kind, 0) + 1
+
+            # UNRELATED pairs are not stored. The table answers "what does this
+            # fact relate to", and filling it with negatives would bury the
+            # answer -- most candidates above the similarity threshold still
+            # turn out unrelated.
+            if kind == UNRELATED:
+                continue
+
+            rationale = str(verdict["rationale"])
+            dimension = verdict.get("reconciling_dimension")
+            if kind == RECONCILED and dimension:
+                rationale = f"[{dimension}] {rationale}"
+
+            created = repo.insert_relationship(
+                conn,
+                fact_id_a=fact.id,
+                fact_id_b=other_id,
+                relationship_type=kind,
+                rationale=rationale,
+                confidence=float(verdict["confidence"]),
+            )
+            if created is not None:
+                summary.relationships_created += 1
+            logger.info(
+                "fact %s -> %s : %s (cosine %.3f)",
+                fact.id, other_id, kind, candidate_scores[position],
+            )
+
+    return summary

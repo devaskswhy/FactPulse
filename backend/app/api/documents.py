@@ -18,9 +18,12 @@ from app.schemas.document import (
     RechunkResponse,
 )
 from app.schemas.fact import ExtractionSummaryOut
+from app.schemas.relationship import LinkingSummaryOut
 from app.services.extract import ExtractionError
 from app.services.ingest import EmptyPdfError, ingest_pdf, rechunk_document
 from app.services.pdf import PdfParseError
+from app.services.embed import EmbeddingError
+from app.services.link import link_document_facts
 from app.services.pipeline import extract_document_facts
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -83,6 +86,9 @@ async def upload_document(
             ExtractionSummaryOut(**result.extraction.as_dict())
             if result.extraction
             else None
+        ),
+        linking=(
+            LinkingSummaryOut(**result.linking.as_dict()) if result.linking else None
         ),
     )
 
@@ -214,3 +220,26 @@ def extract(
             status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
     return ExtractionSummaryOut(**summary.as_dict())
+
+
+@router.post(
+    "/{document_id}/link",
+    response_model=LinkingSummaryOut,
+    summary="Embed this document's facts and relate them to the corpus",
+)
+def link(
+    document_id: int, conn: sqlite3.Connection = Depends(db_dependency)
+) -> LinkingSummaryOut:
+    """Run (or re-run) the relationship engine for one document.
+
+    Idempotent: pairs already judged are skipped, so re-running only fills in
+    what is missing rather than re-billing every comparison.
+    """
+    _require_document(conn, document_id)
+    try:
+        summary = link_document_facts(conn, document_id)
+    except (ExtractionError, EmbeddingError) as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    return LinkingSummaryOut(**summary.as_dict())

@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.schemas.fact import Grounding
+
 # Not an Enum, for the same reason fact_type isn't: the reconciliation model may
 # discover categories we did not anticipate. Kept here as documentation and as a
 # suggestion for the UI's legend.
@@ -44,3 +46,67 @@ class Relationship(RelationshipBase):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class RelatedFact(BaseModel):
+    """One relationship, joined with the fact on the other end of it.
+
+    Carries enough of the related fact and its source for a UI to render a full
+    side-by-side comparison -- statement, values, document, page, quote -- so
+    the frontend does not need a second request per relationship.
+    """
+
+    relationship_id: int
+    relationship_type: str = Field(
+        ..., description="corroborates, contradicts, or reconciled."
+    )
+    rationale: str | None = Field(
+        None,
+        description=(
+            "Concrete explanation citing the values and periods from both "
+            "facts. For a reconciled pair it is prefixed with the reconciling "
+            "dimension in square brackets."
+        ),
+    )
+    relationship_confidence: float | None = Field(None, ge=0.0, le=1.0)
+
+    # The fact on the other side.
+    fact_id: int
+    fact_type: str
+    subject: str | None = None
+    statement: str
+    normalized_value: str | None = None
+    unit: str | None = None
+    time_scope: str | None = None
+    confidence: float | None = None
+    grounding: Grounding | None = None
+
+    # Where it came from.
+    document_id: int
+    document_title: str | None = None
+    document_filename: str
+
+
+class RelationshipList(BaseModel):
+    fact_id: int
+    total: int = Field(..., ge=0)
+    relationships: list[RelatedFact] = Field(default_factory=list)
+
+
+class LinkingSummaryOut(BaseModel):
+    """What one linking run did."""
+
+    document_id: int
+    facts_embedded: int = Field(..., ge=0)
+    facts_compared: int = Field(
+        ..., ge=0, description="Facts that had at least one candidate above threshold."
+    )
+    pairs_evaluated: int = Field(
+        ..., ge=0, description="Candidate pairs sent to the classifier."
+    )
+    relationships_created: int = Field(..., ge=0)
+    by_type: dict[str, int] = Field(
+        default_factory=dict,
+        description="Verdict counts including unrelated, which is not stored.",
+    )
+    errors: int = Field(..., ge=0)

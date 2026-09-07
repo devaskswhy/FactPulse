@@ -13,7 +13,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.db import repository as repo
 from app.db.database import db_dependency
-from app.schemas.fact import Fact, FactList, ReviewList, SchemaResponse
+from app.schemas.fact import BBox, Fact, FactList, Grounding, ReviewList, SchemaResponse
+from app.schemas.relationship import RelatedFact, RelationshipList
 
 router = APIRouter(tags=["facts"])
 
@@ -106,3 +107,64 @@ def get_review_queue(
             conn, resolved=resolved, issue_type=issue_type, limit=limit, offset=offset
         ),
     )
+
+
+def _row_to_related(row) -> RelatedFact:
+    """Map one joined relationship+fact+document row onto the response model."""
+    bbox = None
+    if row["bbox_x0"] is not None:
+        bbox = BBox(
+            x0=row["bbox_x0"], y0=row["bbox_y0"], x1=row["bbox_x1"], y1=row["bbox_y1"]
+        )
+    grounding = None
+    if row["quote"] is not None or row["page_number"] is not None:
+        grounding = Grounding(
+            quote=row["quote"], page_number=row["page_number"], bbox=bbox
+        )
+    return RelatedFact(
+        relationship_id=row["relationship_id"],
+        relationship_type=row["relationship_type"],
+        rationale=row["rationale"],
+        relationship_confidence=row["relationship_confidence"],
+        fact_id=row["id"],
+        fact_type=row["fact_type"],
+        subject=row["subject"],
+        statement=row["statement"],
+        normalized_value=row["normalized_value"],
+        unit=row["unit"],
+        time_scope=row["time_scope"],
+        confidence=row["confidence"],
+        grounding=grounding,
+        document_id=row["document_id"],
+        document_title=row["document_title"],
+        document_filename=row["document_filename"],
+    )
+
+
+@router.get(
+    "/facts/{fact_id}/relationships",
+    response_model=RelationshipList,
+    summary="Facts related to this one, across documents",
+)
+def get_fact_relationships(
+    fact_id: int,
+    relationship_type: str | None = Query(
+        None, description="Filter to one type: corroborates, contradicts, reconciled."
+    ),
+    conn: sqlite3.Connection = Depends(db_dependency),
+) -> RelationshipList:
+    """Every corroborating, contradicting or reconciled counterpart of a fact.
+
+    Each entry carries the related fact in full plus its source document, page
+    and quote, so a comparison view can be rendered without a follow-up request
+    per relationship. Direction is not significant: a relationship stored as
+    (a, b) is returned when asking about either end.
+    """
+    if repo.get_fact(conn, fact_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no fact {fact_id}")
+
+    rows = repo.list_related_facts(conn, fact_id)
+    related = [_row_to_related(r) for r in rows]
+    if relationship_type:
+        related = [r for r in related if r.relationship_type == relationship_type]
+    return RelationshipList(fact_id=fact_id, total=len(related), relationships=related)

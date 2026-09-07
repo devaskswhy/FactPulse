@@ -1,4 +1,4 @@
-"""Pipeline steps 1-5: ingest, parse, chunk, extract, ground.
+"""Pipeline steps 1-8: ingest, parse, chunk, extract, ground, embed, link.
 
 Ordering here is deliberate. The PDF is parsed *before* any row is written, so
 an unreadable upload never leaves a half-created document behind. The write
@@ -14,6 +14,7 @@ no Gemini key is configured the document still ingests and simply stops at
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 
@@ -21,9 +22,13 @@ from app.core.config import settings
 from app.db import repository as repo
 from app.schemas.document import Document
 from app.services.chunker import chunk_pages
+from app.services.embed import EmbeddingError
 from app.services.extract import ExtractionError
 from app.services.pdf import PdfParseError, parse_pdf, sha256_bytes, store_pdf
+from app.services.link import LinkingSummary, link_document_facts
 from app.services.pipeline import ExtractionSummary, extract_document_facts
+
+logger = logging.getLogger(__name__)
 
 
 class EmptyPdfError(PdfParseError):
@@ -40,6 +45,7 @@ class IngestResult:
     chunk_count: int
     deduplicated: bool  # True when this file was already ingested
     extraction: ExtractionSummary | None = None  # None when extraction was skipped
+    linking: LinkingSummary | None = None        # None when linking was skipped
 
 
 def ingest_pdf(
@@ -98,6 +104,11 @@ def ingest_pdf(
 
     extraction = _maybe_extract(conn, document, extract=extract)
 
+    # Linking is a batch step over the document's whole fact set, so it runs
+    # after extraction rather than per fact: a fact needs its siblings embedded
+    # before it is worth comparing anything against the corpus.
+    linking = _maybe_link(conn, document, extraction=extraction)
+
     # Re-read: extraction advances the document's status.
     document = repo.get_document(conn, document_id) or document
     return IngestResult(
@@ -105,6 +116,7 @@ def ingest_pdf(
         chunk_count=len(drafts),
         deduplicated=False,
         extraction=extraction,
+        linking=linking,
     )
 
 
@@ -129,6 +141,31 @@ def _maybe_extract(
         # only the model step failed. Surface it as status, not as a 500.
         repo.set_document_status(conn, document.id, "extraction_failed")
         return None
+
+
+def _maybe_link(
+    conn: sqlite3.Connection,
+    document: Document,
+    *,
+    extraction: ExtractionSummary | None,
+) -> LinkingSummary | None:
+    """Embed and link, if extraction actually produced anything.
+
+    Skipped silently when extraction was skipped or found nothing -- there is
+    nothing to compare. A failure here leaves the facts intact; relationships
+    are derived data and can be rebuilt with POST /documents/{id}/link.
+    """
+    if not settings.link_on_upload or extraction is None:
+        return None
+    if extraction.facts_inserted == 0:
+        return None
+    try:
+        summary = link_document_facts(conn, document.id)
+    except (ExtractionError, EmbeddingError) as exc:
+        logger.warning("linking failed for document %s: %s", document.id, exc)
+        return None
+    repo.set_document_status(conn, document.id, "linked")
+    return summary
 
 
 def rechunk_document(conn: sqlite3.Connection, document: Document) -> int:

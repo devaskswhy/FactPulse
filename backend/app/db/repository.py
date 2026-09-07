@@ -11,6 +11,7 @@ import sqlite3
 
 from app.schemas.document import Chunk, Document
 from app.schemas.fact import BBox, Fact, FactAttribute, FactType, Grounding
+from app.schemas.relationship import Relationship
 from app.schemas.review import ReviewItem
 from app.services.chunker import ChunkDraft
 
@@ -426,3 +427,167 @@ def count_review_queue(
         "SELECT COUNT(*) AS n FROM review_queue WHERE resolved = ?",
         (1 if resolved else 0,),
     ).fetchone()["n"]
+
+
+# ----------------------------------------------------------------- embeddings
+
+
+def upsert_embedding(
+    conn: sqlite3.Connection, fact_id: int, vector: bytes, dim: int
+) -> None:
+    conn.execute(
+        "INSERT INTO embeddings (fact_id, vector, dim) VALUES (?, ?, ?) "
+        "ON CONFLICT(fact_id) DO UPDATE SET vector = excluded.vector, dim = excluded.dim",
+        (fact_id, vector, dim),
+    )
+
+
+def get_embedding(conn: sqlite3.Connection, fact_id: int) -> tuple[bytes, int] | None:
+    row = conn.execute(
+        "SELECT vector, dim FROM embeddings WHERE fact_id = ?", (fact_id,)
+    ).fetchone()
+    return (row["vector"], row["dim"]) if row else None
+
+
+def count_embeddings(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) AS n FROM embeddings").fetchone()["n"]
+
+
+def load_candidate_embeddings(
+    conn: sqlite3.Connection, exclude_document_id: int
+) -> list[sqlite3.Row]:
+    """Every embedded fact NOT from the given document.
+
+    Same-document facts are excluded because two sentences from one report
+    restating the same figure are a property of that document's prose, not a
+    cross-document corroboration. The interesting comparisons are between
+    sources.
+    """
+    return conn.execute(
+        "SELECT e.fact_id, e.vector, e.dim, f.document_id "
+        "FROM embeddings e JOIN facts f ON f.id = e.fact_id "
+        "WHERE f.document_id != ?",
+        (exclude_document_id,),
+    ).fetchall()
+
+
+# --------------------------------------------------------------- relationships
+
+
+def _to_relationship(row: sqlite3.Row) -> Relationship:
+    return Relationship(
+        id=row["id"],
+        fact_id_a=row["fact_id_a"],
+        fact_id_b=row["fact_id_b"],
+        relationship_type=row["relationship_type"],
+        rationale=row["rationale"],
+        confidence=row["confidence"],
+        created_at=row["created_at"],
+    )
+
+
+def insert_relationship(
+    conn: sqlite3.Connection,
+    *,
+    fact_id_a: int,
+    fact_id_b: int,
+    relationship_type: str,
+    rationale: str | None,
+    confidence: float | None,
+) -> int | None:
+    """Write one relationship, or return None if the pair is already recorded.
+
+    The UNIQUE index on (a, b, type) makes re-running the linking step
+    idempotent; INSERT OR IGNORE turns the collision into a no-op rather than
+    an error.
+    """
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO relationships "
+        "(fact_id_a, fact_id_b, relationship_type, rationale, confidence) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (fact_id_a, fact_id_b, relationship_type, rationale, confidence),
+    )
+    return int(cur.lastrowid) if cur.rowcount else None
+
+
+def relationship_exists(
+    conn: sqlite3.Connection, fact_id_a: int, fact_id_b: int
+) -> bool:
+    """Has this unordered pair already been judged, in either direction?"""
+    row = conn.execute(
+        "SELECT 1 FROM relationships WHERE "
+        "(fact_id_a = ? AND fact_id_b = ?) OR (fact_id_a = ? AND fact_id_b = ?) "
+        "LIMIT 1",
+        (fact_id_a, fact_id_b, fact_id_b, fact_id_a),
+    ).fetchone()
+    return row is not None
+
+
+def count_relationships(
+    conn: sqlite3.Connection, *, relationship_type: str | None = None
+) -> int:
+    if relationship_type:
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM relationships WHERE relationship_type = ?",
+            (relationship_type,),
+        ).fetchone()["n"]
+    return conn.execute("SELECT COUNT(*) AS n FROM relationships").fetchone()["n"]
+
+
+def list_relationships(
+    conn: sqlite3.Connection,
+    *,
+    relationship_type: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[Relationship]:
+    where = " WHERE relationship_type = ?" if relationship_type else ""
+    params: list[object] = [relationship_type] if relationship_type else []
+    rows = conn.execute(
+        f"SELECT * FROM relationships{where} ORDER BY id LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    return [_to_relationship(r) for r in rows]
+
+
+def list_related_facts(conn: sqlite3.Connection, fact_id: int) -> list[sqlite3.Row]:
+    """Every relationship touching this fact, joined with the other fact and its
+    source document.
+
+    Returns enough in one query for the UI to render a side-by-side comparison
+    without a second round trip: the relationship, the other fact in full, and
+    the document it came from. The CASE picks whichever end of the pair is not
+    the fact being asked about, so direction does not matter to the caller.
+    """
+    return conn.execute(
+        """
+        SELECT
+            r.id                AS relationship_id,
+            r.relationship_type AS relationship_type,
+            r.rationale         AS rationale,
+            r.confidence        AS relationship_confidence,
+            r.created_at        AS related_at,
+            r.fact_id_a         AS fact_id_a,
+            r.fact_id_b         AS fact_id_b,
+            f.*,
+            d.id                AS doc_id,
+            d.title             AS document_title,
+            d.filename          AS document_filename
+        FROM relationships r
+        JOIN facts f
+          ON f.id = CASE WHEN r.fact_id_a = :fid THEN r.fact_id_b ELSE r.fact_id_a END
+        JOIN documents d ON d.id = f.document_id
+        WHERE r.fact_id_a = :fid OR r.fact_id_b = :fid
+        ORDER BY r.id
+        """,
+        {"fid": fact_id},
+    ).fetchall()
+
+
+def get_fact_context(conn: sqlite3.Connection, fact_id: int) -> sqlite3.Row | None:
+    """A fact joined with its document title, for building the classifier prompt."""
+    return conn.execute(
+        "SELECT f.*, d.title AS document_title, d.filename AS document_filename "
+        "FROM facts f JOIN documents d ON d.id = f.document_id WHERE f.id = ?",
+        (fact_id,),
+    ).fetchone()

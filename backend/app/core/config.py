@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # Gemini
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.6-flash"
-    gemini_embedding_model: str = "text-embedding-004"
+    gemini_embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 768
 
     # storage
@@ -34,6 +34,7 @@ class Settings(BaseSettings):
 
     # extraction
     extract_on_upload: bool = True
+    link_on_upload: bool = True
     extraction_max_attempts: int = 4
     # Calibrated against gemini-3.6-flash, whose confidence floor on hedged
     # prose sits near 0.70 -- a 0.5 threshold never fires and so never

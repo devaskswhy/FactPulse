@@ -15,8 +15,8 @@ reasoning behind it.
 
 ## Status
 
-Pipeline steps 1-5 and 8 are implemented: ingest, parse, chunk, extract,
-ground, and review. Embedding and cross-document linking are next.
+All eight pipeline steps are implemented: ingest, parse, chunk, extract,
+ground, embed, link, review. The frontend is still a scaffold.
 
 Extraction needs `GEMINI_API_KEY`. Without it the backend still runs and still
 ingests documents; they simply stop at `chunked` and `POST /extract` answers
@@ -66,6 +66,8 @@ The schema is applied automatically on startup; `init_db()` is idempotent.
 | `GET /facts` | List facts; filter by document, type, subject, confidence |
 | `GET /facts/{id}` | One fact with its grounding and EAV attributes |
 | `GET /schema` | The `fact_types` registry: labels the model invented |
+| `GET /facts/{id}/relationships` | Related facts with verdict and rationale |
+| `POST /documents/{id}/link` | Run or re-run the relationship engine |
 | `GET /review` | The review queue: facts the pipeline flagged |
 | `GET /health` | Liveness, schema state, whether a Gemini key is set |
 
@@ -131,3 +133,24 @@ docs/        ARCHITECTURE.md
 ```
 
 `.env` files and `factpulse.db` are gitignored.
+
+### Cross-document relationships
+
+After extraction, each document's facts are embedded and compared against
+everything already in the layer. Candidates come from cosine similarity
+(brute-force numpy, appropriate to this scale); a single Gemini call per fact
+judges its whole shortlist at once.
+
+| Verdict | Meaning |
+| --- | --- |
+| `corroborates` | Same claim, independently stated |
+| `contradicts` | Incompatible under the same scope, period, unit and basis |
+| `reconciled` | Looks like a conflict; a named difference explains it |
+| `unrelated` | Retrieved but not actually about the same thing (not stored) |
+
+```bash
+curl http://127.0.0.1:8000/facts/1/relationships
+```
+
+Each entry carries the related fact, its document, page, quote and the
+rationale, so a comparison view renders without a second request.

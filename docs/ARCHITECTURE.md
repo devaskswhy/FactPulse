@@ -46,7 +46,7 @@ Steps 5 and 7 are the two that make this more than a summarizer. Step 5 means
 no fact exists in the system without a page and a rectangle you can point at.
 Step 7 is where the cross-document judgement happens.
 
-Steps 1-5 and 8 are implemented. Steps 6-7 are not.
+All eight steps are implemented.
 
 ---
 
@@ -63,15 +63,18 @@ Steps 1-5 and 8 are implemented. Steps 6-7 are not.
       repository.py    SQL for documents and chunks
     api/
       health.py        GET /health
-      documents.py     upload, list, inspect, extract, rechunk, delete
-      facts.py         GET /facts, /facts/{id}, /schema, /review
+      documents.py     upload, list, inspect, extract, link, rechunk, delete
+      facts.py         GET /facts, /facts/{id}, /facts/{id}/relationships,
+                       /schema, /review
     schemas/           pydantic models for every request and response
     services/
       pdf.py           PyMuPDF parsing, text cleanup, storage, quote grounding
       chunker.py       page-aware chunking with overlap
       extract.py       Gemini structured-output fact extraction
       pipeline.py      verify, ground, persist, route for review
-      ingest.py        steps 1-5 wired together in one transaction
+      embed.py         fact statement embeddings, packed as float32 BLOBs
+      link.py          cosine retrieval + batched relationship classification
+      ingest.py        all eight steps wired together in one transaction
   run.py               dev entrypoint
 /frontend              Next.js App Router, TypeScript, Tailwind
 /docs                  this file
@@ -377,28 +380,109 @@ the re-run path and would become the queue's entry point.
 
 ---
 
-## 6. Reconciliation
+## 6. Reconciliation: the relationship engine
 
-Given two facts about the same subject, the linking step decides between
-roughly:
+Steps 6 and 7. `embed.py` produces vectors, `link.py` retrieves candidates and
+judges them. Runs as a batch at the end of each document's ingestion, comparing
+that document's new facts against everything already in the layer.
+
+### Verdicts
 
 | Type | Meaning |
 | --- | --- |
-| `corroborates` | Same claim, independently stated. Raises confidence. |
-| `contradicts` | Incompatible, and the context does *not* explain the gap. |
-| `reconcilable` | Differ, but the difference is explained by time, scope, unit, or basis. |
-| `refines` | One is a more specific version of the other. |
-| `supersedes` | A later statement replaces an earlier one. |
-| `unrelated` | Looked similar under cosine; is not actually about the same thing. |
+| `corroborates` | Same underlying claim, independently stated. Wording or precision may differ. |
+| `contradicts` | Genuinely incompatible under the *same* subject, scope, period, unit and basis. |
+| `reconciled` | Looks like a conflict, but a named difference explains it — period, scope, unit, definition, or basis. |
+| `unrelated` | Similar enough to be retrieved, but not about the same thing. |
 
-`reconcilable` is the category that earns the schema. Distinguishing it from
-`contradicts` requires exactly the fields above: `time_scope` (FY2024 vs
-CY2024), `unit` (thousands vs millions), `subject` plus `fact_attributes`
-(consolidated vs segment, GAAP vs non-GAAP). A model given only the two
-sentences has to guess. A model given the sentences *plus* their normalized
-values, units, scopes, and attributes can state which axis they differ on —
-and that statement goes in `rationale`, where a person can check it against the
-two highlighted source rectangles.
+`reconciled` is the category the whole schema exists to serve, and the reason
+`normalized_value`, `unit` and `time_scope` are real columns rather than EAV
+rows: the classifier needs them side by side to tell "different period" from
+"disagreement".
+
+Unlike `fact_type`, this **is** a closed set, enforced by an `enum` in the
+response schema. The distinction is deliberate. Fact types are a property of
+the corpus and must grow; relationship types are the product's own vocabulary,
+they are what the UI renders, and a model inventing a fifth would silently
+break that rendering. The database column stays free text so the set can grow
+later without a migration — the constraint lives at the point of decision, not
+in the schema.
+
+`unrelated` verdicts are **not** stored. The table answers "what does this fact
+relate to", and most retrieved candidates are unrelated; storing them would
+bury the answer.
+
+### Retrieval: brute force, deliberately
+
+Candidates come from cosine similarity over `embeddings`, loaded into one numpy
+matrix and scored with a single vectorized dot product — O(n) per new fact.
+
+That is the right call at this system's scale. At 1k facts by 768 float32 dims
+the entire matrix is ~3 MB and the multiply is sub-millisecond, so a vector
+index would add operational weight for no measurable gain. It stops being
+right somewhere in the high tens of thousands, where reloading every vector per
+fact begins to dominate. **FAISS** (in-process), **pgvector** (if the store
+moves to Postgres), or **Qdrant** (standalone) are the natural upgrade paths.
+`embeddings` is the only table that would change, and `find_candidates()` is
+the only caller.
+
+Facts from the *same* document are excluded. Two sentences in one report
+restating the same figure is a property of that document's prose, not a
+cross-document corroboration.
+
+`SIMILARITY_THRESHOLD` (0.75) and `TOP_K` (8) trade model calls against recall:
+too high and a real contradiction phrased differently never reaches the
+classifier; too low and the classifier spends its budget rejecting noise. Both
+are measured starting points, not derived constants.
+
+### Normalisation is not optional
+
+Gemini returns unit-length vectors at its native 3072 dimensions, but a
+*truncated* output is not renormalised for you — `gemini-embedding-001` at 768
+dims comes back with a norm around 0.58. Every vector is therefore normalised
+on write, which also makes similarity a plain dot product and keeps retrieval a
+single matrix multiply.
+
+### One call per fact, not per pair
+
+The first implementation judged each pair in its own request. At top-k
+candidates per fact that is k calls per fact, and it exhausted a free-tier
+**daily** quota on a two-document corpus — 21 calls for 4 new facts.
+
+Since every candidate is compared against the *same* fact A, they share one
+request: the model sees A once and returns a verdict per candidate, keyed by
+index. That is O(facts) calls instead of O(facts x k) — 26 pairs judged in 4
+calls — and it lets the model see all candidates together, which helps it pick
+the closest match rather than judging each in isolation.
+
+A candidate the model returns no verdict for is skipped and counted as an
+error. Defaulting it to `unrelated` would silently bury a pair; defaulting it
+to anything else would invent a claim.
+
+### Quota errors are not all alike
+
+A 429 from a per-minute rate limit is worth retrying. A 429 from a **daily**
+quota is not — no backoff we would sit through will clear it, so retrying just
+burns four attempts and thirty seconds before failing anyway. Gemini names the
+quota in the error body (`GenerateRequestsPerDayPerProjectPerModel`), which is
+how the two are distinguished. A daily-quota error stops the linking run
+immediately rather than grinding through the remaining facts.
+
+Quotas are **per model**, so switching `GEMINI_MODEL` gives a fresh allowance.
+
+### Known limits
+
+- **Re-running re-judges unrelated pairs.** The skip-already-judged guard reads
+  the `relationships` table, and `unrelated` verdicts are not stored, so a
+  second run pays to reach the same conclusion about them. Storing negatives
+  would fix the cost and defeat the table's purpose; a separate
+  judged-pairs ledger is the real fix if re-runs become common.
+- **Linking runs inline in the upload request**, so a document with many facts
+  makes for a slow upload.
+- **New facts are compared against older ones, not vice versa.** A relationship
+  is discovered when the *second* of a pair is ingested. Re-running
+  `POST /documents/{id}/link` on an older document picks up anything added
+  since.
 
 ---
 
@@ -425,56 +509,52 @@ throughout).
 
 ## 8. Current status
 
-Pipeline steps 1-5 and 8 are implemented. Steps 6-7 (embedding and
-cross-document linking) are not.
+All eight pipeline steps are implemented: ingest, parse, chunk, extract,
+ground, embed, link, review.
 
 **Working**
 
-- SQLite schema, applied automatically on boot
-- **Ingest, parse, chunk** — `POST /documents` dedupes by SHA-256, parses with
-  PyMuPDF, chunks page-aware, writes `documents` + `chunks` in one transaction
-- **Extract, ground, review** — Gemini structured output per chunk; quotes
-  verified against the source, located in the PDF for a bounding box, and
-  written to `facts`, `fact_attributes` and the `fact_types` registry. Anything
-  doubtful also lands in `review_queue`
+- `POST /documents` runs the whole pipeline: dedupe, parse, chunk, extract
+  facts, ground each quote to a page and box, embed, and relate the new facts
+  to everything already in the layer
 - `GET /facts`, `GET /facts/{id}` — facts with grounding and attributes
+- `GET /facts/{id}/relationships` — related facts with verdict, rationale,
+  and enough of the other fact and its source to render a comparison in one
+  request
 - `GET /schema` — the fact_types registry, the vocabulary the corpus produced
 - `GET /review` — the review queue
-- `POST /documents/{id}/extract` — run or re-run extraction
+- `POST /documents/{id}/extract` and `/link` — re-run either step
 - Document CRUD, chunk listing, original-PDF download, rechunk
 - `GET /health` — liveness, schema state, Gemini key presence
 - Next.js "Hello FactPulse" page with a live backend status indicator
 
 **Not built yet**
 
-Embeddings, cross-document linking, and the UI beyond the landing page. The
-`embeddings` and `relationships` tables exist but are empty.
+The UI beyond the landing page. Everything the frontend needs is served.
 
-### Notes on the ingest step
+### Notes on ingest
 
-- **Parse before write.** The PDF is fully parsed before any row is inserted,
-  so an unreadable upload never leaves a half-created document behind.
-- **Content-addressed storage.** Originals are kept at `uploads/<sha256>.pdf`.
-  Grounding needs the file to turn a quote into a box, and the viewer needs it
-  to render pages. `DELETE` leaves the file alone — another document row may
-  reference the same bytes.
-- **Dedupe answers 200, not 201.** Nothing was created, so the status says so.
-- **Scanned PDFs are rejected explicitly** with 422 naming OCR as the missing
-  piece, distinct from the 400 for bytes that are not a PDF.
-- **Token counts are estimates** (~4 chars/token), used only to decide where to
-  cut. Treat the column as approximate.
-- **Chunk overlap carries page attribution.** A chunk's `page_start` is the
-  page its repeated tail came from, so a fact found in that text still points
-  at the right page.
+- **Parse before write**, so an unreadable upload leaves no half-created row.
+- **Content-addressed storage** at `uploads/<sha256>.pdf`; grounding and the
+  viewer both need the original. `DELETE` leaves the file alone.
+- **Dedupe answers 200, not 201** — nothing was created.
+- **Scanned PDFs get 422** naming OCR, distinct from 400 for non-PDF bytes.
+- **Token counts are estimates** (~4 chars/token), used only to pick cut points.
+- **Chunk overlap carries page attribution**, so a fact found in repeated text
+  still points at the right page.
 
-### Known limits
+### Model availability
 
-- Extraction runs inline in the upload request, so a large document makes for a
-  slow upload.
-- Chunks are processed sequentially, one model call each.
-- Re-running extraction with `replace=false` will duplicate facts; there is no
-  fact-level deduplication yet.
-- `fact_types` counters are maintained on write, so a cascade delete does not
-  decrement them. `resync_fact_types()` rebuilds the registry from the facts
-  table, and runs after both a `replace=true` extraction and a document
-  delete.
+Model names go stale faster than code. `gemini-2.5-flash` and
+`text-embedding-004` were both specified during development and neither is
+available to new API keys — the first returns 404 pointing at a successor, the
+second is absent from `models.list()` entirely. Current defaults are
+`gemini-3.6-flash` and `gemini-embedding-001`. If a call 404s, list what the
+key can actually reach before assuming the code is wrong.
+
+### Cost and quota
+
+The pipeline makes, per document: one model call per chunk (extraction), one
+embedding call per batch of 100 facts, and one model call per fact that has
+candidates (linking). Free-tier daily quotas are per model, so switching
+`GEMINI_MODEL` gives a fresh allowance.

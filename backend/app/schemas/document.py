@@ -68,6 +68,10 @@ class DocumentUploadResponse(BaseModel):
     deduplicated: bool = Field(
         ..., description="True when this exact file had already been ingested."
     )
+    linking: "LinkingSummaryOut | None" = Field(
+        None,
+        description="Result of the relationship step, or null when it was skipped.",
+    )
     extraction: "ExtractionSummaryOut | None" = Field(
         None,
         description=(
@@ -89,5 +93,6 @@ class RechunkResponse(BaseModel):
 
 
 from app.schemas.fact import ExtractionSummaryOut  # noqa: E402  (circular-import break)
+from app.schemas.relationship import LinkingSummaryOut  # noqa: E402
 
 DocumentUploadResponse.model_rebuild()

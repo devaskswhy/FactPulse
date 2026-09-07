@@ -1,0 +1,61 @@
+"""Settings, loaded from the environment / .env."""
+
+from functools import lru_cache
+from pathlib import Path
+
+from dotenv import load_dotenv
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# /backend
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+load_dotenv(BACKEND_DIR / ".env")
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=BACKEND_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    app_name: str = "FactPulse"
+    version: str = "0.1.0"
+
+    # Gemini
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.0-flash"
+    gemini_embedding_model: str = "text-embedding-004"
+    embedding_dim: int = 768
+
+    # storage
+    database_path: str = "factpulse.db"
+    upload_dir: str = "uploads"
+
+    # server
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
+    frontend_origin: str = "http://localhost:3000"
+
+    @property
+    def database_file(self) -> Path:
+        """Absolute path to the SQLite file."""
+        p = Path(self.database_path)
+        return p if p.is_absolute() else BACKEND_DIR / p
+
+    @property
+    def upload_path(self) -> Path:
+        p = Path(self.upload_dir)
+        return p if p.is_absolute() else BACKEND_DIR / p
+
+    @property
+    def gemini_configured(self) -> bool:
+        return bool(self.gemini_api_key)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

@@ -1,0 +1,18 @@
+# FactPulse backend
+# Python 3.11
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+python-multipart==0.0.20
+
+# PDF parsing
+PyMuPDF==1.25.1
+
+# Gemini
+google-genai==0.3.0
+
+# vector math
+numpy==2.2.1

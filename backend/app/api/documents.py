@@ -6,6 +6,7 @@ import sqlite3
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.db import repository as repo
@@ -67,8 +68,22 @@ async def upload_document(
             detail=f"file is {len(data) / 1_048_576:.1f} MB, limit is {settings.max_upload_mb} MB",
         )
 
+    # Off the event loop, deliberately.
+    #
+    # ingest_pdf is fully synchronous and can run for minutes -- model calls,
+    # PyMuPDF parsing, SQLite writes. Calling it directly from an `async def`
+    # route blocks the ONLY event loop for that entire time, which makes every
+    # other endpoint unresponsive, the SSE progress stream included. The
+    # progress endpoint exists precisely to report on this work, so blocking it
+    # with that work made the feature impossible: the client saw one frozen
+    # frame until the upload finished.
+    #
+    # run_in_threadpool moves it to a worker thread. The SQLite connection is
+    # opened with check_same_thread=False, so handing it across is safe, and
+    # only one thread ever touches it.
     try:
-        result = ingest_pdf(
+        result = await run_in_threadpool(
+            ingest_pdf,
             conn,
             filename=file.filename or "untitled.pdf",
             data=data,

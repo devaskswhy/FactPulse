@@ -61,6 +61,9 @@ export function AppShell() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<number | null>(null);
+  // Bumped after an ingest or a resolve so the fact list, schema chips and
+  // taxonomy panel all re-fetch and the layer is visibly growing.
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const railRef = useRef<HTMLUListElement>(null);
   const mainRef = useRef<HTMLDivElement>(null);
@@ -76,6 +79,7 @@ export function AppShell() {
     try {
       setData(await getDocuments());
       setError(null);
+      setRefreshKey((k) => k + 1);
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : "Could not load documents.",
@@ -283,13 +287,25 @@ export function AppShell() {
         <main className="min-w-0 flex-1">
           <div ref={mainRef} className="h-full">
             {screen === "upload" && (
-              <UploadScreen onIngested={() => void load(true)} />
+              <UploadScreen
+                onIngested={() => {
+                  void load(true);
+                  setScreen("facts");
+                }}
+              />
             )}
             {screen === "facts" && (
-              <FactExplorerScreen documentId={selected} totals={totals} />
+              <FactExplorerScreen
+                documentId={selected}
+                totals={totals}
+                refreshKey={refreshKey}
+              />
             )}
             {screen === "review" && (
-              <ReviewQueueScreen openCount={totals?.open_review_items ?? 0} />
+              <ReviewQueueScreen
+                openCount={totals?.open_review_items ?? 0}
+                onResolved={() => void load(true)}
+              />
             )}
           </div>
         </main>

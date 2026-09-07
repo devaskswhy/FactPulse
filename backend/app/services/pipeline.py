@@ -223,11 +223,21 @@ def extract_document_facts(
             total=len(chunks),
         )
 
+    # Facts are persisted after every model call has returned, so the stored
+    # count stays 0 for the whole extraction phase. Counting them as each
+    # chunk's result arrives keeps the live tally moving during the longest
+    # part of the run, which is exactly when a viewer needs to see something
+    # happening.
+    seen_facts = 0
+
     def on_result(result, done: int, total: int) -> None:
+        nonlocal seen_facts
+        seen_facts += len(result.facts)
         if progress:
             progress.update(
                 current=done,
                 total=total,
+                facts=seen_facts,
                 message=f"extracted chunk {done} of {total}",
             )
 

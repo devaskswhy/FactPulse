@@ -133,3 +133,316 @@ export function statusTone(
       return "idle";
   }
 }
+
+// ------------------------------------------------------------ facts & schema
+
+export type BBox = { x0: number; y0: number; x1: number; y1: number };
+
+export type Grounding = {
+  quote: string | null;
+  page_number: number | null;
+  bbox: BBox | null;
+};
+
+export type FactAttribute = { key: string; value: string | null };
+
+export type Fact = {
+  id: number;
+  document_id: number;
+  chunk_id: number | null;
+  fact_type: string;
+  subject: string | null;
+  statement: string;
+  normalized_value: string | null;
+  unit: string | null;
+  time_scope: string | null;
+  confidence: number | null;
+  grounding: Grounding | null;
+  attributes: FactAttribute[];
+  created_at: string;
+};
+
+export type FactList = {
+  total: number;
+  scope: "knowledge-layer" | "document";
+  /** document_id -> title, so a cross-document list can name each source. */
+  documents: Record<string, string>;
+  facts: Fact[];
+};
+
+export type FactType = {
+  name: string;
+  first_seen_at: string;
+  example_fact_id: number | null;
+  fact_count: number;
+};
+
+export type SchemaResponse = {
+  total_types: number;
+  total_facts: number;
+  fact_types: FactType[];
+};
+
+export type EvidenceBundle = {
+  fact: Fact;
+  page_image_url: string;
+  page_image_width: number;
+  page_image_height: number;
+  render_scale: number;
+  /** Already in PIXELS of the page image -- no conversion needed. */
+  bbox: BBox | null;
+  bbox_pdf_points: BBox | null;
+  quote: string | null;
+  document_id: number;
+  document_title: string | null;
+  document_filename: string;
+  page_number: number | null;
+  grounded: boolean;
+};
+
+export type RelatedFact = {
+  relationship_id: number;
+  relationship_type: string;
+  rationale: string | null;
+  relationship_confidence: number | null;
+  fact_id: number;
+  fact_type: string;
+  subject: string | null;
+  statement: string;
+  normalized_value: string | null;
+  unit: string | null;
+  time_scope: string | null;
+  confidence: number | null;
+  grounding: Grounding | null;
+  document_id: number;
+  document_title: string | null;
+  document_filename: string;
+};
+
+export type RelationshipList = {
+  fact_id: number;
+  total: number;
+  relationships: RelatedFact[];
+};
+
+export type FactFilters = {
+  document_id?: number | null;
+  fact_type?: string | null;
+  subject?: string | null;
+  min_confidence?: number | null;
+  limit?: number;
+  offset?: number;
+};
+
+export function getFacts(filters: FactFilters = {}): Promise<FactList> {
+  const params = new URLSearchParams();
+  if (filters.document_id != null)
+    params.set("document_id", String(filters.document_id));
+  if (filters.fact_type) params.set("fact_type", filters.fact_type);
+  if (filters.subject) params.set("subject", filters.subject);
+  if (filters.min_confidence != null)
+    params.set("min_confidence", String(filters.min_confidence));
+  params.set("limit", String(filters.limit ?? 200));
+  params.set("offset", String(filters.offset ?? 0));
+  return request<FactList>(`/facts?${params}`);
+}
+
+export function getSchema(): Promise<SchemaResponse> {
+  return request<SchemaResponse>("/schema");
+}
+
+export function getEvidence(factId: number): Promise<EvidenceBundle> {
+  return request<EvidenceBundle>(`/facts/${factId}/evidence`);
+}
+
+export function getRelationships(factId: number): Promise<RelationshipList> {
+  return request<RelationshipList>(`/facts/${factId}/relationships`);
+}
+
+/** Absolute URL for a page image; the API returns a relative path. */
+export function pageImageUrl(path: string): string {
+  return path.startsWith("http") ? path : `${API_BASE_URL}${path}`;
+}
+
+// ------------------------------------------------------------- review queue
+
+export type ReviewFactContext = {
+  fact_id: number;
+  fact_type: string;
+  subject: string | null;
+  statement: string;
+  normalized_value: string | null;
+  unit: string | null;
+  time_scope: string | null;
+  confidence: number | null;
+  quote: string | null;
+  page_number: number | null;
+  document_id: number;
+  document_title: string | null;
+};
+
+export type ReviewChunkContext = {
+  chunk_id: number;
+  page_start: number | null;
+  page_end: number | null;
+  text_excerpt: string;
+  document_id: number;
+  document_title: string | null;
+};
+
+export type ReviewEntry = {
+  id: number;
+  issue_type: string;
+  note: string | null;
+  resolved: boolean;
+  created_at: string;
+  resolution_action: string | null;
+  resolution_note: string | null;
+  resolved_at: string | null;
+  fact: ReviewFactContext | null;
+  chunk: ReviewChunkContext | null;
+  relationship: unknown | null;
+  evidence_url: string | null;
+};
+
+export type ReviewQueue = {
+  total: number;
+  by_issue_type: Record<string, number>;
+  entries: ReviewEntry[];
+};
+
+export type ResolveAction = "accepted" | "rejected" | "edited";
+
+export type FactCorrection = {
+  fact_type?: string;
+  subject?: string;
+  statement?: string;
+  normalized_value?: string;
+  unit?: string;
+  time_scope?: string;
+};
+
+export function getReviewQueue(issueType?: string | null): Promise<ReviewQueue> {
+  const params = new URLSearchParams({ resolved: "false", limit: "200" });
+  if (issueType) params.set("issue_type", issueType);
+  return request<ReviewQueue>(`/review-queue?${params}`);
+}
+
+export function resolveReviewItem(
+  id: number,
+  body: {
+    action: ResolveAction;
+    resolution_note: string;
+    correction?: FactCorrection;
+  },
+): Promise<unknown> {
+  return request(`/review-queue/${id}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// ------------------------------------------------------------------ upload
+
+export type UploadResponse = {
+  document: DocumentSummary & { chunk_count?: number };
+  chunk_count: number;
+  deduplicated: boolean;
+  self_check: Record<string, number>;
+  linking: { relationships_created: number; pool_size: number } | null;
+  extraction: {
+    facts_inserted: number;
+    facts_grounded: number;
+    chunks_processed: number;
+    chunks_failed: number;
+    quota_exhausted: boolean;
+    fact_types: string[];
+  } | null;
+};
+
+/**
+ * Upload a PDF.
+ *
+ * Deliberately not using `request()`: this posts FormData, needs no
+ * Content-Type (the browser sets the multipart boundary), and can run for
+ * minutes on a large document, so the caller wants the raw promise to race
+ * against the SSE stream.
+ */
+export async function uploadDocument(file: File): Promise<UploadResponse> {
+  const form = new FormData();
+  form.append("file", file);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/documents`, {
+      method: "POST",
+      body: form,
+    });
+  } catch {
+    throw new ApiError(
+      `Cannot reach the FactPulse API at ${API_BASE_URL}. Is the backend running?`,
+    );
+  }
+
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body?.detail) detail = String(body.detail);
+    } catch {
+      /* status line is all we have */
+    }
+    throw new ApiError(detail, response.status);
+  }
+  return (await response.json()) as UploadResponse;
+}
+
+// ---------------------------------------------------------------- progress
+
+export type ProgressSnapshot = {
+  document_id: number | null;
+  filename: string;
+  phase: string;
+  message: string;
+  current: number;
+  total: number;
+  percent: number | null;
+  pages: number;
+  chunks: number;
+  facts: number;
+  relationships: number;
+  elapsed: number;
+  error: string | null;
+};
+
+export function progressStreamUrl(documentId: number): string {
+  return `${API_BASE_URL}/documents/${documentId}/progress/stream`;
+}
+
+export function getProgress(documentId: number): Promise<ProgressSnapshot> {
+  return request<ProgressSnapshot>(`/documents/${documentId}/progress`);
+}
+
+/** Human-readable label for a pipeline phase. */
+export const PHASE_LABEL: Record<string, string> = {
+  queued: "queued",
+  parsing: "reading pages",
+  chunking: "splitting into chunks",
+  extracting: "extracting facts",
+  embedding: "embedding facts",
+  linking: "classifying relationships",
+  checking: "running checks",
+  done: "complete",
+  failed: "failed",
+};
+
+/** Order the pipeline runs in, for the stage tracker. */
+export const PHASE_ORDER = [
+  "parsing",
+  "chunking",
+  "extracting",
+  "embedding",
+  "linking",
+  "checking",
+] as const;

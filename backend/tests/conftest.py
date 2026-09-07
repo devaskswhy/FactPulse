@@ -24,12 +24,22 @@ from app.db.database import get_conn, init_db  # noqa: E402
 
 @pytest.fixture
 def isolated_store(tmp_path, monkeypatch):
-    """Point the app at a fresh database and upload dir for one test."""
+    """Point the app at a fresh database and upload dir for one test.
+
+    A placeholder API key is set too, and that is not incidental. The ingest
+    path skips extraction outright when `gemini_configured` is false, so on a
+    machine with no .env -- a fresh clone, which is exactly what a grader runs
+    first -- the stubbed model would never be reached and the pipeline tests
+    would fail for a reason that has nothing to do with the code under test.
+    Nothing here ever reaches the network: the model is replaced wholesale by
+    the `stubbed` fixture.
+    """
     monkeypatch.setattr(settings, "database_path", str(tmp_path / "test.db"))
     monkeypatch.setattr(settings, "upload_dir", str(tmp_path / "uploads"))
     monkeypatch.setattr(settings, "page_cache_dir", str(tmp_path / "pages"))
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "storage"))
     monkeypatch.setattr(settings, "link_on_upload", False)
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key-not-used")
     init_db(settings.database_file)
     return settings.database_file
 

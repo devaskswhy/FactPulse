@@ -21,8 +21,11 @@ import json
 import logging
 import random
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import Callable
 
 from google import genai
 from google.genai import types
@@ -372,3 +375,86 @@ def extract_facts_from_chunk(
             )
         )
     return facts
+
+
+# ------------------------------------------------------- bounded concurrency
+
+
+@dataclass
+class ChunkExtraction:
+    """Result of one chunk's extraction: facts, or the error that stopped it."""
+
+    index: int
+    chunk_id: int
+    facts: list[ExtractedFact] = field(default_factory=list)
+    error: Exception | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+def extract_chunks_concurrently(
+    chunks: list[tuple[int, str]],
+    client: genai.Client | None = None,
+    concurrency: int | None = None,
+    on_result: "Callable[[ChunkExtraction, int, int], None] | None" = None,
+) -> list[ChunkExtraction]:
+    """Extract facts from many chunks with a bounded number of calls in flight.
+
+    `chunks` is [(chunk_id, text)]. Results come back in the original order
+    regardless of completion order, so downstream fact ids stay deterministic.
+
+    Threads rather than asyncio, deliberately. These calls are I/O-bound HTTPS
+    requests, so a pool of N workers gives exactly the same bounded concurrency
+    an asyncio semaphore would. The difference is at the boundaries: the ingest
+    chain is synchronous and is called from a sync script, a sync FastAPI
+    route, and an async one. `asyncio.run()` raises inside a running event
+    loop, so an async implementation would need a thread-with-its-own-loop
+    shim for the async caller anyway -- threads all the way down is the same
+    concurrency with one less moving part.
+
+    Database writes stay on the calling thread. Only the model calls fan out,
+    so the SQLite connection is never touched concurrently.
+
+    A chunk that fails carries its exception rather than raising, so one bad
+    chunk cannot lose the rest of the document.
+    """
+    if not chunks:
+        return []
+
+    client = client or build_client()
+    workers = max(1, concurrency or settings.extraction_concurrency)
+    workers = min(workers, len(chunks))
+
+    results: list[ChunkExtraction | None] = [None] * len(chunks)
+    completed = 0
+    lock = threading.Lock()
+
+    def work(index: int, chunk_id: int, text: str) -> ChunkExtraction:
+        try:
+            return ChunkExtraction(
+                index=index,
+                chunk_id=chunk_id,
+                facts=extract_facts_from_chunk(text, client=client),
+            )
+        except Exception as exc:  # carried, not raised
+            return ChunkExtraction(index=index, chunk_id=chunk_id, error=exc)
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="extract") as pool:
+        futures = {
+            pool.submit(work, i, chunk_id, text): i
+            for i, (chunk_id, text) in enumerate(chunks)
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results[result.index] = result
+            with lock:
+                completed += 1
+                done = completed
+            if on_result is not None:
+                # Progress is reported as work finishes, which is not input
+                # order -- callers use the count, not the index, for progress.
+                on_result(result, done, len(chunks))
+
+    return [r for r in results if r is not None]

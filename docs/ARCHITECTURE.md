@@ -67,6 +67,7 @@ All eight steps are implemented.
       facts.py         GET /facts, /facts/{id}, /evidence, /relationships,
                        /schema, /review
       review.py        GET /review-queue, POST /review-queue/{id}/resolve
+      progress.py      GET /progress and the per-document SSE stream
     schemas/           pydantic models for every request and response
     services/
       pdf.py           PyMuPDF parsing, text cleanup, storage, quote grounding
@@ -77,6 +78,8 @@ All eight steps are implemented.
       link.py          cosine retrieval + batched relationship classification
       render.py        page PNG rendering, caching, and point->pixel scaling
       selfcheck.py     post-ingestion queries for ambiguous or borderline facts
+      progress.py      in-memory phase/progress state for the SSE endpoint
+      ingest_log.py    one JSONL line per run, for timing comparisons
       ingest.py        all eight steps wired together in one transaction
   run.py               dev entrypoint
 /frontend              Next.js App Router, TypeScript, Tailwind
@@ -663,7 +666,126 @@ fallback.
 
 ---
 
-## 9. Configuration
+## 9. Large-PDF performance
+
+Profiled against `02-delhivery-annual-report-fy24-excerpt.pdf` -- 100 pages,
+6.5 MB, 221 chunks, ~152k estimated tokens.
+
+### Where the time actually goes
+
+| Stage | 100 pages | Share |
+| --- | --- | --- |
+| PDF text extraction | 1.7s | ~0.4% |
+| Chunking | 0.01s | negligible |
+| **Gemini extraction calls** | **minutes** | **~99%** |
+| Embedding | one batched call per 100 facts | small |
+| Relationship classification | one call per fact with candidates | minutes |
+
+Everything that is not a network call is already fast. The work went where the
+time is.
+
+### Parallel page parsing: measured and rejected
+
+The obvious first move is a thread pool over pages. It was implemented,
+measured, and removed, because it made things **worse**:
+
+| Workers | 100-page text extraction |
+| --- | --- |
+| 1 | 1.60s |
+| 2 | 2.11s |
+| 4 | 3.43s |
+| 8 | 3.52s |
+
+Monotonically worse. PyMuPDF's text extraction does not release the GIL, so
+extra threads add contention and buy no parallelism. Opening a second handle is
+not the cause -- `fitz.open()` measures at 1 ms. Rendering behaves the same way:
+2 threads gained 9%, 4 threads were twice as slow.
+
+Real parallelism would need processes, and it is not worth it: 1.7s against an
+ingest dominated by minutes of model calls is 0.4% of the total. `_extract_pages()`
+carries these numbers in a comment so the idea is not re-attempted.
+
+### Bounded-concurrency extraction: the actual fix
+
+`extract_chunks_concurrently()` runs the per-chunk model calls through a thread
+pool of `EXTRACTION_CONCURRENCY` (default 5). Results are returned in input
+order regardless of completion order, so fact ids stay deterministic, and
+**database writes stay on the calling thread** -- only the network calls fan
+out, so the SQLite connection is never touched concurrently. A chunk that fails
+carries its exception rather than raising, so one bad chunk cannot lose the
+document.
+
+Threads rather than asyncio, deliberately. These are I/O-bound HTTPS requests,
+so N workers give exactly the bounded concurrency an asyncio semaphore would.
+The difference is at the boundaries: the ingest chain is synchronous and is
+called from a sync script, a sync route, and an async one. `asyncio.run()`
+raises inside a running event loop, so an async implementation would need a
+thread-with-its-own-loop shim for the async caller anyway. Threads all the way
+down is the same concurrency with one fewer moving part.
+
+Scaling of the mechanism itself, with model latency mocked at the measured
+1.9s so the numbers are not confounded by rate limits:
+
+| Workers | 40 chunks | Speedup |
+| --- | --- | --- |
+| 1 | 76.0s | 1.00x |
+| 3 | 26.6s | 2.86x |
+| 5 | 15.2s | 5.00x |
+| 8 | 9.5s | 8.00x |
+
+Linear, as expected for I/O-bound work.
+
+### What the free tier does to that
+
+Against the live API the gain is real but smaller, because **free-tier
+requests-per-minute is the binding constraint, not our concurrency**. Raising
+`EXTRACTION_CONCURRENCY` past about 6 mostly buys 429s and backoff. On a paid
+tier the mocked numbers above are what to expect.
+
+### Retry that actually waits long enough
+
+Gemini returns a `retryDelay` in the error body ("retry in 59s" for a
+per-minute cap). The original backoff was exponential capped at 30s, so every
+attempt landed inside the still-closed window and the call failed anyway. The
+hint is now honoured (capped at 70s) across extraction, embedding and
+classification. Per-day quota is still never retried -- nothing we would wait
+through clears it.
+
+### Candidate retrieval
+
+Already fixed in section 8: the embeddings matrix is loaded once per document
+rather than once per fact. Measured at 1 corpus load instead of 55 on a 55-fact
+document, 0.3 ms to build the pool and 0.01 ms per similarity search.
+
+### Progress reporting
+
+`app/services/progress.py` publishes phase-by-phase state, and
+`GET /documents/{id}/progress/stream` serves it as SSE. Phases are `parsing`,
+`chunking`, `extracting`, `embedding`, `linking`, `checking`, then `done` or
+`failed`, each with an N-of-M counter and running tallies of pages, chunks,
+facts and relationships.
+
+Progress is reported per phase rather than as one global percentage. A global
+bar would have to predict extraction time, which depends on model latency and
+how hard the rate limiter pushes back, so it would either lie or stall.
+"extracting: chunk 84 of 221" is honest and is what a viewer needs during a
+multi-minute wait.
+
+The stream emits on every change and at least every two seconds regardless, so
+a client can show a live elapsed timer through a long call where no discrete
+step completes.
+
+### The timing log
+
+Every ingest appends one JSON line to `backend/storage/ingest_log.jsonl`:
+pages, chunks, facts, relationships, per-phase seconds, model, concurrency and
+final status. JSONL rather than a table because these are append-only
+observations about runs, not part of the knowledge layer -- profiling should
+not be able to interfere with the data being profiled.
+
+---
+
+## 10. Configuration
 
 `backend/.env` (see `backend/.env.example`; `.env` is gitignored):
 
@@ -684,7 +806,7 @@ throughout).
 
 ---
 
-## 10. Current status
+## 11. Current status
 
 All eight pipeline steps are implemented: ingest, parse, chunk, extract,
 ground, embed, link, review.

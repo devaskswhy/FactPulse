@@ -36,6 +36,7 @@ from app.services.embed import (
     pack_vector,
     unpack_vector,
 )
+from app.services.progress import ProgressTracker
 from app.services.extract import (
     ExtractionError,
     QuotaExhaustedError,
@@ -477,7 +478,9 @@ def classify_candidates(
 
 
 def link_document_facts(
-    conn: sqlite3.Connection, document_id: int
+    conn: sqlite3.Connection,
+    document_id: int,
+    progress: "ProgressTracker | None" = None,
 ) -> LinkingSummary:
     """Embed a document's facts and relate them to the rest of the corpus.
 
@@ -487,6 +490,8 @@ def link_document_facts(
     summary = LinkingSummary(document_id=document_id)
     client = build_client()
 
+    if progress:
+        progress.phase("embedding", "embedding new facts")
     summary.facts_embedded = embed_document_facts(conn, document_id, client=client)
 
     facts = repo.list_facts(conn, document_id=document_id, limit=10_000)
@@ -506,7 +511,20 @@ def link_document_facts(
         # reason to walk its facts at all.
         return summary
 
-    for fact in facts:
+    if progress:
+        progress.phase(
+            "linking",
+            f"classifying relationships against {pool.size} existing facts",
+            total=len(facts),
+        )
+
+    for position, fact in enumerate(facts, start=1):
+        if progress:
+            progress.update(
+                current=position,
+                message=f"classifying fact {position} of {len(facts)}",
+                relationships=summary.relationships_created,
+            )
         stored = repo.get_embedding(conn, fact.id)
         if stored is None:
             continue

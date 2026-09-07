@@ -71,6 +71,9 @@ The schema is applied automatically on startup; `init_db()` is idempotent.
 | `GET /documents/{id}/pages/{n}/image` | Rendered page PNG (cached) |
 | `POST /documents/{id}/reground` | Recompute page/bbox from stored quotes (free) |
 | `GET /review-queue` | Unresolved items with full context |
+| `GET /documents/{id}/progress` | Current ingestion phase and counters |
+| `GET /documents/{id}/progress/stream` | Live progress as server-sent events |
+| `GET /progress` | Recent and in-flight ingestions |
 | `POST /review-queue/{id}/resolve` | accepted / rejected / edited |
 | `POST /documents/{id}/link` | Run or re-run the relationship engine |
 | `GET /review` | The review queue: facts the pipeline flagged |
@@ -224,3 +227,35 @@ exercises the real path. Measured on the three India-macro excerpts:
 
 Embeddings added always equals that document's own fact count — earlier
 documents are read, never re-embedded.
+
+### Large PDFs
+
+Profiled on a 100-page, 6.5 MB annual report (221 chunks). Almost all the time
+is network: PDF text extraction is 1.7s, roughly 0.4% of the run.
+
+**Extraction runs with bounded concurrency** (`EXTRACTION_CONCURRENCY`, default
+5). Results stay in input order and database writes stay on one thread — only
+the model calls fan out.
+
+**Parallel page parsing was measured and removed.** PyMuPDF doesn't release the
+GIL, so threads made it monotonically worse (1 worker 1.60s → 4 workers 3.43s).
+The numbers are recorded in `_extract_pages()` so it isn't re-attempted.
+
+**Progress is streamed**, so a multi-minute ingest isn't a silent wait:
+
+```bash
+curl -N http://127.0.0.1:8000/documents/3/progress/stream
+```
+
+```js
+const es = new EventSource('/documents/3/progress/stream');
+es.onmessage = (e) => render(JSON.parse(e.data));
+```
+
+Phases are `parsing → chunking → extracting → embedding → linking → checking →
+done`, each with an N-of-M counter. Progress is per-phase rather than one global
+percentage, which would have to guess extraction time and would either lie or
+stall.
+
+**Every run appends a line to `backend/storage/ingest_log.jsonl`** — pages,
+chunks, facts, relationships, per-phase seconds, model and concurrency.

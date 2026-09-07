@@ -30,9 +30,10 @@ from app.services.extract import (
     ExtractionError,
     QuotaExhaustedError,
     build_client,
-    extract_facts_from_chunk,
+    extract_chunks_concurrently,
 )
 from app.services.pdf import locate_quote_bbox, verify_quote
+from app.services.progress import ProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -181,9 +182,17 @@ def _persist_fact(
 
 
 def extract_document_facts(
-    conn: sqlite3.Connection, document: Document, *, replace: bool = False
+    conn: sqlite3.Connection,
+    document: Document,
+    *,
+    replace: bool = False,
+    progress: "ProgressTracker | None" = None,
 ) -> ExtractionSummary:
     """Extract facts from every chunk of a document.
+
+    Model calls fan out across a bounded thread pool; database writes stay on
+    this thread, in chunk order, so fact ids remain deterministic and the
+    SQLite connection is never touched concurrently.
 
     With replace=True, existing facts for the document are cleared first so the
     step can be re-run without duplicating everything.
@@ -207,41 +216,70 @@ def extract_document_facts(
         pdf_path = None
 
     repo.set_document_status(conn, document.id, "extracting")
+    if progress:
+        progress.phase(
+            "extracting",
+            f"extracting facts from {len(chunks)} chunks",
+            total=len(chunks),
+        )
 
-    for index, chunk in enumerate(chunks):
-        try:
-            facts = extract_facts_from_chunk(chunk.text, client=client)
-        except QuotaExhaustedError as exc:
-            # Every remaining chunk would fail identically. Stop, and record it
-            # once with the scope of what was missed -- grinding on would just
-            # bill 24 doomed calls and fill the queue with 24 copies of the
-            # same message, which is what this replaced.
-            remaining = len(chunks) - index
-            logger.warning(
-                "daily quota exhausted; stopping extraction with %d chunk(s) left",
-                remaining,
+    def on_result(result, done: int, total: int) -> None:
+        if progress:
+            progress.update(
+                current=done,
+                total=total,
+                message=f"extracted chunk {done} of {total}",
             )
-            summary.chunks_failed += remaining
-            repo.insert_review_item(
-                conn,
-                fact_id=None,
-                chunk_id=chunk.id,
-                issue_type=ISSUE_QUOTA_EXHAUSTED,
-                note=(
-                    f"Daily model quota exhausted after {index} of {len(chunks)} "
-                    f"chunks. {remaining} chunk(s) were not processed, so this "
-                    f"document's facts are incomplete. Re-run "
-                    f"POST /documents/{document.id}/extract once quota resets, "
-                    f"or switch GEMINI_MODEL (quotas are per model). "
-                    f"Underlying error: {str(exc)[:200]}"
-                ),
-            )
-            summary.review_items += 1
-            summary.quota_exhausted = True
-            break
-        except ExtractionError as exc:
-            # One chunk failing must not lose the rest of the document. Record
-            # it against the chunk so the gap is visible.
+
+    results = extract_chunks_concurrently(
+        [(c.id, c.text) for c in chunks],
+        client=client,
+        on_result=on_result,
+    )
+
+    by_chunk = {c.id: c for c in chunks}
+    quota_hit = False
+
+    for position, result in enumerate(results):
+        chunk = by_chunk.get(result.chunk_id)
+        if chunk is None:  # pragma: no cover - ids come straight from chunks
+            continue
+
+        if result.error is not None:
+            exc = result.error
+            if isinstance(exc, QuotaExhaustedError):
+                # Every in-flight call after this one fails the same way. Record
+                # it once with the scope of what was missed, rather than one
+                # identical row per remaining chunk.
+                if not quota_hit:
+                    quota_hit = True
+                    remaining = sum(
+                        1
+                        for r in results[position:]
+                        if isinstance(r.error, QuotaExhaustedError)
+                    )
+                    logger.warning(
+                        "daily quota exhausted; %d chunk(s) unprocessed", remaining
+                    )
+                    repo.insert_review_item(
+                        conn,
+                        fact_id=None,
+                        chunk_id=chunk.id,
+                        issue_type=ISSUE_QUOTA_EXHAUSTED,
+                        note=(
+                            f"Daily model quota exhausted with {remaining} of "
+                            f"{len(chunks)} chunk(s) unprocessed, so this "
+                            f"document's facts are incomplete. Re-run "
+                            f"POST /documents/{document.id}/extract once quota "
+                            f"resets, or switch GEMINI_MODEL (quotas are per "
+                            f"model). Underlying error: {str(exc)[:200]}"
+                        ),
+                    )
+                    summary.review_items += 1
+                    summary.quota_exhausted = True
+                summary.chunks_failed += 1
+                continue
+
             logger.warning("extraction failed for chunk %s: %s", chunk.id, exc)
             summary.chunks_failed += 1
             repo.insert_review_item(
@@ -254,7 +292,7 @@ def extract_document_facts(
             summary.review_items += 1
             continue
 
-        for fact in facts:
+        for fact in result.facts:
             _persist_fact(
                 conn,
                 document=document,
@@ -264,6 +302,8 @@ def extract_document_facts(
                 summary=summary,
             )
         summary.chunks_processed += 1
+        if progress:
+            progress.update(facts=summary.facts_inserted)
 
     # Counters are maintained on write, so a replace=True run leaves stale ones
     # behind. Rebuild from the facts table to keep the registry honest.

@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     database_path: str = "factpulse.db"
     upload_dir: str = "uploads"
     page_cache_dir: str = "page_cache"
+    storage_dir: str = "storage"
 
     # Pixels per PDF point when rendering a page image. 2.0 renders a US
     # Letter page at 1224x1584, legible without being enormous.
@@ -41,6 +42,9 @@ class Settings(BaseSettings):
     extract_on_upload: bool = True
     link_on_upload: bool = True
     extraction_max_attempts: int = 4
+    # Model calls in flight at once. Free-tier RPM caps are the binding
+    # constraint, so raising this past ~6 mostly buys 429s and backoff.
+    extraction_concurrency: int = 5
     # Calibrated against gemini-3.6-flash, whose confidence floor on hedged
     # prose sits near 0.70 -- a 0.5 threshold never fires and so never
     # surfaces anything. 0.9 catches facts the model expressed a real
@@ -66,6 +70,11 @@ class Settings(BaseSettings):
     @property
     def upload_path(self) -> Path:
         p = Path(self.upload_dir)
+        return p if p.is_absolute() else BACKEND_DIR / p
+
+    @property
+    def storage_path(self) -> Path:
+        p = Path(self.storage_dir)
         return p if p.is_absolute() else BACKEND_DIR / p
 
     @property

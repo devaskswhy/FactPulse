@@ -13,6 +13,7 @@ from app.api import (
     documents_router,
     facts_router,
     health_router,
+    progress_router,
     review_router,
 )
 from app.core.config import settings
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     init_db()
     settings.upload_path.mkdir(parents=True, exist_ok=True)
     settings.page_cache_path.mkdir(parents=True, exist_ok=True)
+    settings.storage_path.mkdir(parents=True, exist_ok=True)
     yield
 
 
@@ -47,6 +49,7 @@ app.include_router(health_router)
 app.include_router(documents_router)
 app.include_router(facts_router)
 app.include_router(review_router)
+app.include_router(progress_router)
 
 
 @app.get("/", tags=["system"], summary="Service banner")

@@ -735,12 +735,37 @@ Scaling of the mechanism itself, with model latency mocked at the measured
 
 Linear, as expected for I/O-bound work.
 
-### What the free tier does to that
+### Live API: 3x on a burst, unproven at scale
 
-Against the live API the gain is real but smaller, because **free-tier
-requests-per-minute is the binding constraint, not our concurrency**. Raising
-`EXTRACTION_CONCURRENCY` past about 6 mostly buys 429s and backoff. On a paid
-tier the mocked numbers above are what to expect.
+| Run | Chunks | Concurrency | Wall | Per chunk |
+| --- | --- | --- | --- | --- |
+| 12-page slice | 10 | 1 | 58.3s | 5.83s |
+| 12-page slice | 10 | 5 | 18.9s | **1.89s** |
+| 100 pages | 221 | 5 | 1339.5s | 6.05s |
+| 100 pages | 37 of 221 | 1 | 297.8s | 8.02s (incomplete) |
+
+**3.08x on the short burst**, clean, zero failures.
+
+**On the sustained 221-chunk run the gain does not hold.** Per-chunk time
+degraded from 1.89s to 6.05s, and notably **no 429s were returned** -- chunk
+density does not explain it either (645 vs 690 mean tokens, ~9 facts per chunk
+in both). Free-tier throughput appears to be paced server-side over a sustained
+load, in a way the client cannot see or retry around.
+
+The sequential 100-page baseline that would settle this **could not be
+completed**: it exhausted the daily quota after 37 of 221 chunks. Its 8.02s per
+chunk is a 37-sample figure that also includes backoff incurred while the quota
+condition was being detected, so it is suggestive of a modest gain at sustained
+scale and no more than that.
+
+So: the 3.08x is real for bursts and must not be quoted for a 100-page
+document. The mocked scaling above is what a paid tier should deliver, since
+there the pacing constraint is removed.
+
+An unintended demonstration: the quota short-circuit worked exactly as
+designed. The sequential run detected the exhausted quota, wrote **one** review
+entry naming 184 unprocessed chunks, set status `extraction_incomplete`, and
+stopped in 5 minutes rather than grinding through 184 doomed calls.
 
 ### Retry that actually waits long enough
 

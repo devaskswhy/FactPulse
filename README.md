@@ -235,7 +235,13 @@ is network: PDF text extraction is 1.7s, roughly 0.4% of the run.
 
 **Extraction runs with bounded concurrency** (`EXTRACTION_CONCURRENCY`, default
 5). Results stay in input order and database writes stay on one thread — only
-the model calls fan out.
+the model calls fan out. Measured **3.08×** on a 10-chunk burst (58.3s → 18.9s).
+
+On a sustained 221-chunk run the gain does not hold — per-chunk time drifts
+from 1.89s to 6.05s with no 429s returned, which looks like server-side pacing
+of free-tier throughput. The sequential baseline that would confirm this
+exhausted the daily quota at 37/221 chunks. Treat 3× as a burst figure, not a
+whole-document one.
 
 **Parallel page parsing was measured and removed.** PyMuPDF doesn't release the
 GIL, so threads made it monotonically worse (1 worker 1.60s → 4 workers 3.43s).

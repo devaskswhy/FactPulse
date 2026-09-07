@@ -15,8 +15,11 @@ reasoning behind it.
 
 ## Status
 
-Scaffold. The schema, config, health endpoint, pydantic models, and a landing
-page are in place. Ingestion, extraction, grounding, and linking are next.
+Pipeline steps 1-3 (ingest, parse, chunk) are implemented and tested. Fact
+extraction, grounding, embedding, and linking are next.
+
+No Gemini call is made anywhere yet, so the backend runs fully without
+`GEMINI_API_KEY`.
 
 ## Stack
 
@@ -46,6 +49,29 @@ The schema is applied automatically on startup; `init_db()` is idempotent.
 
 - Health: <http://127.0.0.1:8000/health>
 - API docs: <http://127.0.0.1:8000/docs>
+
+### Endpoints
+
+| | |
+| --- | --- |
+| `POST /documents` | Upload a PDF: parse, chunk, store. Deduped by SHA-256 |
+| `GET /documents` | List documents |
+| `GET /documents/{id}` | One document, with chunk count |
+| `GET /documents/{id}/chunks` | Its chunks, with page ranges |
+| `GET /documents/{id}/file` | The stored original PDF |
+| `POST /documents/{id}/rechunk` | Rebuild chunks after changing settings |
+| `DELETE /documents/{id}` | Delete, cascading to everything derived |
+| `GET /health` | Liveness, schema state, whether a Gemini key is set |
+
+```bash
+curl -F "file=@report.pdf" http://127.0.0.1:8000/documents
+```
+
+Uploading the same file twice returns the existing document with
+`deduplicated: true` and a 200 rather than a 201.
+
+Chunk size is tunable via `CHUNK_MAX_TOKENS` and `CHUNK_OVERLAP_TOKENS`;
+`POST /documents/{id}/rechunk` reapplies them to an already-ingested PDF.
 
 ### Frontend — http://localhost:3000
 

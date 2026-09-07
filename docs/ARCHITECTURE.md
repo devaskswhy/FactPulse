@@ -58,9 +58,15 @@ Step 7 is where the cross-document judgement happens.
     db/
       schema.sql       the single source of truth for the schema
       database.py      sqlite3 connections, init_db(), FastAPI dependency
-    api/               routers (health today; documents/facts/graph next)
+      repository.py    SQL for documents and chunks
+    api/
+      health.py        GET /health
+      documents.py     upload, list, inspect, rechunk, delete
     schemas/           pydantic models for every request and response
-    services/          parsing, chunking, extraction, embedding, linking
+    services/
+      pdf.py           PyMuPDF parsing, text cleanup, content-addressed storage
+      chunker.py       page-aware chunking with overlap
+      ingest.py        steps 1-3 wired together in one transaction
   run.py               dev entrypoint
 /frontend              Next.js App Router, TypeScript, Tailwind
 /docs                  this file
@@ -292,15 +298,50 @@ throughout).
 
 ## 7. Current status
 
-Scaffold. Working today:
+Steps 1-3 of the pipeline are implemented and tested; steps 4-8 are not.
+
+**Working**
 
 - SQLite schema, applied automatically on boot
-- `GET /health` — reports liveness, whether the schema is applied, the table
-  list, and whether a Gemini key is present
-- `GET /` — service banner
-- pydantic models for documents, chunks, facts, attributes, fact types,
-  relationships, and review items
+- **Ingest, parse, chunk** — `POST /documents` takes a PDF, dedupes it by
+  SHA-256, parses it with PyMuPDF, chunks it page-aware, and writes
+  `documents` + `chunks` in one transaction
+- `GET /documents`, `GET /documents/{id}`, `GET /documents/{id}/chunks`
+- `GET /documents/{id}/file` — the stored original, for the page viewer
+- `POST /documents/{id}/rechunk` — rebuild chunks after changing settings
+- `DELETE /documents/{id}` — cascades to everything derived
+- `GET /health`, `GET /` — liveness, schema state, Gemini key presence
+- pydantic models for every table and every response
 - Next.js "Hello FactPulse" page with a live backend status indicator
 
-Not built yet: PDF upload, parsing, chunking, extraction, grounding, embedding,
-linking, and the UI beyond the landing page.
+**Not built yet**
+
+Fact extraction, grounding, embedding, linking, and the UI beyond the landing
+page. No Gemini call is made anywhere yet, so the backend runs fully without
+`GEMINI_API_KEY`.
+
+### Notes on the ingest step
+
+- **Parse before write.** The PDF is fully parsed before any row is inserted,
+  so an unreadable upload never leaves a half-created document behind. The
+  document, its chunks, and the final status then land in one transaction.
+- **Content-addressed storage.** The original bytes are kept at
+  `uploads/<sha256>.pdf`. Grounding needs the file to turn a quote into a
+  bounding box, and the viewer needs it to render pages. Because the name is
+  the hash, re-uploading a duplicate writes nothing, and `DELETE` leaves the
+  file alone — another document row may legitimately reference the same bytes.
+- **Dedupe answers 200, not 201.** A repeat upload returns the existing
+  document with `deduplicated: true`; nothing was created, so the status code
+  says so.
+- **Scanned PDFs are rejected explicitly.** A PDF that opens but yields no text
+  returns 422 with a message naming OCR as the missing piece, distinct from the
+  400 returned for bytes that are not a PDF at all. The two need different
+  fixes, so they are different errors.
+- **Token counts are estimates.** `chunks.token_count` comes from a
+  ~4-chars-per-token heuristic rather than a real tokenizer; it decides where to
+  cut, and pulling in a tokenizer dependency for that is not worth it. Treat the
+  column as approximate.
+- **Chunk overlap carries page attribution.** When a chunk's tail is repeated
+  into the next chunk, that chunk's `page_start` is the page the tail came
+  from, not the page that follows. A fact extracted from the repeated text
+  therefore still points at the right page.

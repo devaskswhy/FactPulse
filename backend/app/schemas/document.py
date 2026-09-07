@@ -43,3 +43,39 @@ class Chunk(ChunkBase):
     document_id: int
 
     model_config = {"from_attributes": True}
+
+
+class DocumentDetail(Document):
+    """A document plus counts that the list view does not need."""
+
+    chunk_count: int = Field(0, ge=0, description="Number of chunks stored for this document.")
+
+
+class DocumentList(BaseModel):
+    total: int = Field(..., ge=0, description="Total documents stored.")
+    documents: list[Document] = Field(default_factory=list)
+
+
+class DocumentUploadResponse(BaseModel):
+    """Result of POST /documents.
+
+    `deduplicated` is True when the sha256 matched a document already ingested;
+    in that case the existing document is returned and nothing was re-parsed.
+    """
+
+    document: Document
+    chunk_count: int = Field(..., ge=0)
+    deduplicated: bool = Field(
+        ..., description="True when this exact file had already been ingested."
+    )
+
+
+class ChunkList(BaseModel):
+    document_id: int
+    total: int = Field(..., ge=0)
+    chunks: list[Chunk] = Field(default_factory=list)
+
+
+class RechunkResponse(BaseModel):
+    document_id: int
+    chunk_count: int = Field(..., ge=0, description="Chunks after re-chunking.")

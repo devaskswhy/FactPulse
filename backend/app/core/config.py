@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     database_path: str = "factpulse.db"
     upload_dir: str = "uploads"
 
+    # chunking
+    chunk_max_tokens: int = 900
+    chunk_overlap_tokens: int = 120
+    max_upload_mb: int = 50
+
     # server
     api_host: str = "127.0.0.1"
     api_port: int = 8000

@@ -509,13 +509,24 @@ fixed enum would have hidden.
 
 ### Motion is deliberately split in two
 
-The landing explainer pins, scrubs and scroll-jacks. The app does none of those
-things — 200–300 ms stagger reveals only, no pinning, no scroll hijacking. The
-explainer is a pitch someone scrolls once, where pacing them through four ideas
-*is* the argument. The app is a tool someone operates for the tenth time today,
-where motion beyond making a state change legible is a tax charged on every
-repetition. That distinction is written at the top of `app-shell.tsx` so it
-does not get "improved" into more scroll-jacking later.
+The landing explainer gets a bit of entrance choreography on its four ideas —
+each fades up once as it scrolls into view. The app below does none of that:
+200–300 ms stagger reveals only, no pinning, no scroll hijacking, ever. The
+explainer is a pitch someone scrolls once; the app is a tool someone operates
+for the tenth time today, where motion beyond making a state change legible is
+a tax charged on every repetition. That distinction is written at the top of
+`app-shell.tsx` so it does not get "improved" into scroll-jacking later.
+
+The explainer used to pin the viewport and scrub through its four stages on
+one shared timeline — one full screen-height of scroll consumed per stage
+regardless of how little text it held. In practice that meant long stretches
+of scroll with nothing happening, a stage's few lines stranded in the middle
+of an otherwise empty frame, and a genuinely blank screen during the handoff
+between stages. Replaced with a plain scroll-reveal: each stage sits in normal
+document flow, sized to its own content, no shared timeline for one stage's
+animation to owe another. Choreography that shows a reader nothing is not
+choreography, it is friction — and it did not survive contact with an actual
+reader scrolling it.
 
 ---
 

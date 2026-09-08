@@ -3,12 +3,9 @@
 /* ==========================================================================
    APP SHELL — MOTION RULES. Please read before adding animation here.
 
-   The landing explainer above this pins, scrubs and scroll-jacks. That is
-   correct THERE and wrong HERE, and the distinction is deliberate.
-
-   The explainer is a pitch. Someone is deciding whether this product is worth
-   their time, they will scroll it once, and pacing them through four ideas in
-   sequence IS the argument.
+   The landing explainer above this is a one-time pitch: a reader decides
+   whether this product is worth their time, scrolls it once, and a bit of
+   entrance choreography on each of its four ideas earns its keep there.
 
    Everything below is a tool. Someone is trying to find a fact, check a quote,
    or clear a review queue — probably for the tenth time today. Motion here has
@@ -22,7 +19,10 @@
      - Nothing animates on a route change that would delay reading content.
 
    If a future screen seems to want a cinematic moment, it belongs in the
-   explainer, not here.
+   explainer, not here -- and even there, keep it to a plain reveal-on-enter.
+   Pinning the viewport traded a few seconds of "cinematic" for long stretches
+   of scroll where nothing happened and a real blank-screen gap between
+   stages; it did not survive contact with an actual reader scrolling it.
    ========================================================================== */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";

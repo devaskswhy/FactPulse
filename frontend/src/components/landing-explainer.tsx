@@ -19,15 +19,23 @@ import { DURATION, EASE, prefersReducedMotion } from "@/lib/motion";
 gsap.registerPlugin(ScrollTrigger);
 
 /**
- * The explainer. This is the ONE part of FactPulse that scroll-jacks.
+ * The explainer: four ideas, in order, each revealed as it scrolls into view.
  *
- * It pins, scrubs and staggers because it is explaining a concept to someone
- * who has not yet decided to use the product. Choreography earns its keep
- * there: the four stages are sequential, and making the reader advance through
- * them one at a time is the argument, not decoration.
+ * This used to pin the viewport and scrub through the four stages on a
+ * dedicated timeline -- one full screen-height of scroll consumed per stage
+ * regardless of how little text that stage held. In practice that produced
+ * exactly what it sounds like: long stretches of scroll where nothing was
+ * happening, a stage's few lines of text stranded in the middle of an
+ * otherwise empty frame, and on the transition between stages a genuinely
+ * blank screen while the outgoing card had faded and the incoming one had
+ * not yet arrived. Choreography that shows a reader nothing is not
+ * choreography, it is friction.
  *
- * None of that belongs in the app itself. See the note at the top of
- * app-shell.tsx.
+ * A plain scroll-reveal fixes the actual problem instead of tuning the old
+ * timeline's offsets: each stage sits in normal document flow, sized to its
+ * own content, and fades up once as it crosses into view. Total scroll
+ * distance is now however long four short paragraphs actually take to read,
+ * not four multiples of the viewport height.
  */
 
 const STAGES = [
@@ -64,76 +72,35 @@ export function LandingExplainer() {
     if (prefersReducedMotion()) return;
 
     const context = gsap.context(() => {
-      const cards = gsap.utils.toArray<HTMLElement>("[data-stage]");
-      const heading = rootRef.current?.querySelector("[data-explainer-heading]");
-      const rule = rootRef.current?.querySelector("[data-explainer-rule]");
-
-      // The intro is a normal entrance, not scrubbed: it should play at its own
-      // pace when it comes into view rather than being dragged by the wheel.
-      gsap.from([heading, rule], {
-        yPercent: 40,
+      // Intro: a normal entrance, plays once as it comes into view.
+      gsap.from("[data-explainer-heading], [data-explainer-rule]", {
+        yPercent: 30,
         opacity: 0,
         duration: DURATION.base,
         ease: EASE,
         stagger: 0.08,
         scrollTrigger: {
           trigger: rootRef.current,
-          start: "top 70%",
+          start: "top 75%",
         },
       });
 
-      // The pinned run. One timeline scrubbed by scroll position, so the
-      // reader controls the pace in both directions -- scrubbing back up
-      // reverses cleanly, which a set of independent triggers would not.
-      const timeline = gsap.timeline({
-        scrollTrigger: {
-          trigger: "[data-explainer-pin]",
-          start: "top top",
-          // One viewport of scroll per stage, so each gets equal dwell time.
-          end: () => `+=${window.innerHeight * STAGES.length}`,
-          pin: true,
-          scrub: 1, // a beat of lag, so it glides rather than snapping
-          anticipatePin: 1,
-          invalidateOnRefresh: true,
-        },
+      // Each stage fades up once as it crosses into view. No pin, no scrub,
+      // no shared timeline -- every card is independent, so there is nothing
+      // for one stage's animation to owe another and nothing that can leave
+      // the screen blank between them.
+      gsap.utils.toArray<HTMLElement>("[data-stage]").forEach((card) => {
+        gsap.from(card, {
+          opacity: 0,
+          y: 32,
+          duration: DURATION.base,
+          ease: EASE,
+          scrollTrigger: {
+            trigger: card,
+            start: "top 80%",
+          },
+        });
       });
-
-      cards.forEach((card, index) => {
-        const lines = card.querySelectorAll("[data-stage-line]");
-
-        timeline
-          .fromTo(
-            card,
-            { autoAlpha: 0, yPercent: 12 },
-            { autoAlpha: 1, yPercent: 0, duration: 1, ease: EASE },
-            index,
-          )
-          .fromTo(
-            lines,
-            { autoAlpha: 0, y: 24 },
-            { autoAlpha: 1, y: 0, duration: 0.7, ease: EASE, stagger: 0.12 },
-            index + 0.1,
-          );
-
-        // Every stage but the last leaves before the next arrives, so only one
-        // is legible at a time.
-        if (index < STAGES.length - 1) {
-          timeline.to(
-            card,
-            { autoAlpha: 0, yPercent: -12, duration: 0.8, ease: EASE },
-            index + 0.75,
-          );
-        }
-      });
-
-      // The progress rail tracks the same timeline, so it can never disagree
-      // with what is on screen.
-      timeline.fromTo(
-        "[data-explainer-progress]",
-        { scaleY: 0 },
-        { scaleY: 1, duration: STAGES.length, ease: "none" },
-        0,
-      );
     }, rootRef);
 
     return () => context.revert();
@@ -141,13 +108,13 @@ export function LandingExplainer() {
 
   return (
     <section ref={rootRef} className="relative bg-bg">
-      {/* Intro */}
-      <div className="mx-auto flex min-h-[70vh] max-w-5xl flex-col justify-center px-6 py-24 md:px-10">
+      <div className="mx-auto max-w-4xl px-6 py-20 md:px-10 md:py-28">
+        {/* Intro */}
         <div data-explainer-heading>
           <p className="font-mono text-xs uppercase tracking-[0.3em] text-accent">
             The fact knowledge layer
           </p>
-          <h1 className="mt-6 max-w-3xl text-4xl leading-[1.1] tracking-tight text-text md:text-6xl">
+          <h1 className="mt-5 max-w-2xl text-3xl leading-[1.15] tracking-tight text-text md:text-5xl">
             Two documents disagree.{" "}
             <span className="text-text-dim">
               The useful answer is almost never
@@ -157,61 +124,27 @@ export function LandingExplainer() {
         </div>
         <div
           data-explainer-rule
-          className="mt-10 flex items-center gap-4 text-sm text-text-dim"
+          className="mt-8 flex items-center gap-4 text-sm text-text-dim"
         >
-          <span className="h-px w-16 bg-border" />
-          <span>Scroll to see how FactPulse tells them apart</span>
-        </div>
-      </div>
-
-      {/* Pinned run */}
-      <div
-        data-explainer-pin
-        className="relative flex h-screen items-center overflow-hidden"
-      >
-        {/* Progress rail */}
-        <div className="absolute left-6 top-1/2 hidden h-56 w-px -translate-y-1/2 bg-border md:block">
-          <div
-            data-explainer-progress
-            className="h-full w-full origin-top bg-accent"
-            style={{ transform: "scaleY(0)" }}
-          />
+          <span className="h-px w-12 bg-border" />
+          <span>How FactPulse tells them apart</span>
         </div>
 
-        <div className="relative mx-auto w-full max-w-5xl px-6 md:px-20">
+        {/* Stages, in normal flow -- each sized to its own content. */}
+        <div className="mt-16 space-y-14 md:mt-20 md:space-y-20">
           {STAGES.map((stage) => (
-            <article
-              key={stage.index}
-              data-stage
-              className="absolute inset-x-6 top-1/2 -translate-y-1/2 md:inset-x-20"
-              style={{ opacity: 0, visibility: "hidden" }}
-            >
-              <div
-                data-stage-line
-                className="flex items-center gap-4 font-mono text-xs uppercase tracking-[0.3em] text-accent"
-              >
+            <article key={stage.index} data-stage className="max-w-2xl">
+              <div className="flex items-center gap-4 font-mono text-xs uppercase tracking-[0.3em] text-accent">
                 <span>{stage.index}</span>
                 <span className="h-px w-10 bg-accent/40" />
               </div>
-
-              <h2
-                data-stage-line
-                className="mt-6 text-3xl tracking-tight text-text md:text-5xl"
-              >
+              <h2 className="mt-4 text-2xl tracking-tight text-text md:text-4xl">
                 {stage.title}
               </h2>
-
-              <p
-                data-stage-line
-                className="mt-6 max-w-2xl text-lg leading-relaxed text-text-dim md:text-xl"
-              >
+              <p className="mt-4 text-base leading-relaxed text-text-dim md:text-lg">
                 {stage.body}
               </p>
-
-              <p
-                data-stage-line
-                className="mt-8 border-l border-border pl-4 font-mono text-sm text-text-dim"
-              >
+              <p className="mt-5 border-l border-border pl-4 font-mono text-sm text-text-dim">
                 {stage.detail}
               </p>
             </article>

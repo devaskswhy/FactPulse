@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # server
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    # Comma-separated so a deployed instance can serve both the local dev
+    # server and the deployed frontend at once, without editing .env back and
+    # forth while testing against a live backend from a laptop.
     frontend_origin: str = "http://localhost:3000"
 
     @property
@@ -129,6 +132,10 @@ class Settings(BaseSettings):
     @property
     def gemini_configured(self) -> bool:
         return bool(self.api_keys)
+
+    @property
+    def frontend_origins(self) -> list[str]:
+        return [o.strip() for o in self.frontend_origin.split(",") if o.strip()]
 
 
 @lru_cache

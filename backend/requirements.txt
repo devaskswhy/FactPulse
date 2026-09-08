@@ -17,5 +17,8 @@ google-genai==2.22.0
 # vector math
 numpy==2.2.1
 
-# tests
+# tests -- httpx is also a transitive dep of google-genai, but test_supersedes.py
+# imports fastapi.testclient.TestClient directly, so it is declared explicitly
+# rather than relying on another package's dependency choices to keep providing it.
 pytest==8.3.4
+httpx==0.28.1

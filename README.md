@@ -512,6 +512,7 @@ gitignored.
 | [docs/DEMO_CASES.md](docs/DEMO_CASES.md) | The four required cases with exact fact IDs, verified against the API |
 | [docs/FAILURE_CASE.md](docs/FAILURE_CASE.md) | What the system got wrong, why the source made it hard, and what to do about it |
 | [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Shot-by-shot script for the demo video |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Deploying to Railway (backend) and Vercel (frontend), and what the free tier actually costs |
 
 ## API
 

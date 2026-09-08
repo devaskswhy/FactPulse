@@ -1068,5 +1068,65 @@ key can actually reach before assuming the code is wrong.
 
 The pipeline makes, per document: one model call per chunk (extraction), one
 embedding call per batch of 100 facts, and one model call per fact that has
-candidates (linking). Free-tier daily quotas are per model, so switching
-`GEMINI_MODEL` gives a fresh allowance.
+candidates (linking). Free-tier daily quotas are per (key, model) pair — see
+`services/model_pool.py` — so a second key from a different Google account is
+an independent allowance, not a second slice of the same one.
+
+---
+
+## 12. The offline demo seed
+
+Extracting the committed corpus cost real Gemini calls, over real time,
+against a quota that used to be a single point of failure. Nobody who clones
+this repo should have to pay that cost again just to see a populated
+knowledge layer, and a deployed instance whose database is ever lost — a
+fresh volume, an accidental reset — shouldn't either.
+
+`scripts/seed_demo.py export` dumps `documents`, `chunks`, `facts`,
+`fact_attributes`, `fact_types`, `embeddings`, and `relationships` as
+data-only SQL — no `CREATE TABLE`, schema.sql stays the single source of
+truth for structure — with every id preserved exactly. That last part is not
+cosmetic: `docs/DEMO_CASES.md` cites specific fact and relationship ids (fact
+238, relationship 14, ...), and a seed that renumbered them on import would
+silently break every citation in that document.
+
+**Built on `sqlite3.iterdump()`, not a hand-rolled INSERT builder.**
+`embeddings.vector` is a raw float32 buffer; `iterdump()` already emits the
+correct `X'...'` hex BLOB literal for it, which is exactly the kind of detail
+a reimplementation would get subtly wrong on the first attempt. The one thing
+`iterdump()` gets wrong for this purpose is table order — it emits tables
+**alphabetically** (`embeddings` before `facts`, `chunks` before
+`documents`), and foreign keys are enforced on import, so replaying that order
+verbatim fails immediately with `FOREIGN KEY constraint failed`. The export
+step buckets statements by table and replays them in `schema.sql`'s own
+creation order instead, which is also the FK-dependency-safe order.
+
+**`import_seed()` refuses a non-empty database unless `--force`.** A seed
+script's job is to populate emptiness, not to silently overwrite a real
+corpus — local or, more importantly, a deployed one that has since collected
+genuine uploads. `--force` clears exactly the tables this script owns via
+explicit `DELETE`s rather than relying on cascades: `fact_types` has no FK to
+`facts` (a fact type surviving its own fact's deletion is correct in normal
+operation) and would otherwise be left stale after a forced reseed.
+
+**Wired into startup, not just the CLI.** `app.main._seed_if_empty()` runs
+after `init_db()` on every boot and imports the seed if and only if the
+`facts` table is empty. This is what makes a fresh Railway volume self-healing
+without a manual step: first deploy, empty database, auto-populated corpus,
+`GET /health` correct on the very first request. It is guarded twice —
+`settings.seed_demo_on_empty_db` (default on) and the emptiness check itself
+— so it can be disabled outright, and so it can never fire against a database
+that already holds anything, seeded or real. The test suite disables it in
+`conftest.py`'s `isolated_store` fixture for the same reason: a test spinning
+up `TestClient(app)` on a genuinely empty test database should get an empty
+database, not 335 facts it never asked for.
+
+**What it does not ship.** The source PDFs were gitignored from the start and
+stay that way — this is a database snapshot, not a document archive. A fact's
+stored quote and grounding metadata work fully without the PDF; only the
+page-image highlight in the evidence viewer needs the underlying file, and
+`GET /facts/{id}/evidence` already degrades to `grounded: false` rather than
+erroring when it's absent (see that endpoint's docstring). On a machine or
+deploy that never had the original PDFs, the demo corpus is fully functional
+for facts, relationships, review queue, and subject grouping; only the
+highlighted-page-image panel for those specific facts has nothing to show.

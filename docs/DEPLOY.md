@@ -51,6 +51,15 @@ before treating the deployed URL as long-lived.
 5. Deploy. Check `https://<your-service>.up.railway.app/health` — it should
    report `"database": "ok"` and `"gemini_configured": true`.
 
+   **No manual seeding step needed.** A fresh volume means an empty
+   database, and the backend notices that on startup and loads the
+   committed demo corpus (`backend/seed/demo_corpus.sql`) automatically —
+   335 facts, 53 relationships, zero model calls. `GET /facts?limit=1`
+   should immediately report `"total": 335`. This only ever fires on a
+   genuinely empty database, so it never touches real data from later
+   uploads, including after a redeploy (the volume persists them). See
+   ARCHITECTURE.md, "The offline demo seed."
+
 ---
 
 ## 2. Frontend — Vercel

@@ -40,6 +40,10 @@ def isolated_store(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "storage"))
     monkeypatch.setattr(settings, "link_on_upload", False)
     monkeypatch.setattr(settings, "gemini_api_key", "test-key-not-used")
+    # Off by default so a test spinning up TestClient(app) on a genuinely
+    # empty database gets an empty database, not 335 demo facts it never
+    # asked for. test_seed.py re-enables it explicitly to test the behavior.
+    monkeypatch.setattr(settings, "seed_demo_on_empty_db", False)
     init_db(settings.database_file)
     return settings.database_file
 

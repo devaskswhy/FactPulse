@@ -53,10 +53,14 @@ cp .env.example .env            # then open .env and set GEMINI_API_KEY
 uvicorn main:app --reload
 ```
 
-The SQLite schema is created automatically on first start. Check it came up:
+The SQLite schema is created automatically on first start, and so is the
+demo corpus — a fresh database has no facts yet, and the backend notices that
+and loads the committed 335-fact corpus with zero model calls (see
+"The offline demo seed" below). Check it came up:
 
 - Health: <http://127.0.0.1:8000/health>
 - Interactive API docs: <http://127.0.0.1:8000/docs>
+- `curl http://127.0.0.1:8000/facts?limit=1` should already report `"total": 335`
 
 ### 3. Frontend — http://localhost:3000
 
@@ -100,13 +104,13 @@ cd backend
 pytest
 ```
 
-86 tests. Most cover ingestion, quote grounding, evidence sufficiency,
+96 tests. Most cover ingestion, quote grounding, evidence sufficiency,
 temporal ordering, supersession direction, canonical subject resolution, the
-review queue and key/model rotation with the model stubbed, so they are
-deterministic and need no API key. Five exercise the live relationship
-classifier on synthetic inputs — including the brief's own resigned-director
-case — and they **skip cleanly** when no key is configured or every model's
-daily free-tier quota is spent.
+offline demo seed, the review queue and key/model rotation with the model
+stubbed, so they are deterministic and need no API key. Five exercise the
+live relationship classifier on synthetic inputs — including the brief's own
+resigned-director case — and they **skip cleanly** when no key is configured
+or every model's daily free-tier quota is spent.
 
 ---
 
@@ -373,13 +377,39 @@ entry naming how many chunks went unprocessed, and
 `POST /documents/{id}/extract` resumes later.
 
 It still means a first-time reviewer should **start with a 10–15 page slice**
-rather than a full report.
+rather than a full report — for ingesting something *new*. Nobody has to spend
+quota just to see the committed corpus populated; see "The offline demo seed"
+just below.
 
 Concurrency does not rescue this. Bounded concurrency measured **3.08×** on a
 10-chunk burst (58.3s → 18.9s), but on a sustained 221-chunk run the per-chunk
 time drifted from 1.89s to 6.05s with no 429s returned — free-tier throughput
 appears to be paced server-side. The 3× figure is a burst result and should not
 be read as a whole-document one.
+
+### The offline demo seed
+
+Extracting the committed corpus cost real Gemini calls, over real time. Nobody
+who clones this repo — or redeploys it onto a fresh volume — should have to
+pay that again just to see a populated knowledge layer.
+
+`backend/seed/demo_corpus.sql` is a data-only export of `documents`, `chunks`,
+`facts`, `fact_attributes`, `fact_types`, `embeddings`, and `relationships`,
+with every id preserved exactly — `docs/DEMO_CASES.md` cites specific fact ids,
+and a seed that renumbered them would break every citation in it. The backend
+loads it automatically whenever the `facts` table is empty (a fresh clone, a
+fresh Railway volume, any database that was ever reset), and never otherwise —
+a real corpus, seeded or organically grown, is never touched by this.
+
+What it does not ship: the source PDFs, gitignored from the start and staying
+that way. A fact's stored quote and grounding metadata work fully without one;
+only the highlighted-page-image panel in the evidence viewer needs the
+underlying file, and it already degrades to `grounded: false` rather than
+erroring when the file is absent. `python scripts/seed_demo.py export` /
+`import [--force]` also work as a standalone CLI — full detail and the one
+non-obvious bug it took to get table ordering right (SQLite's `iterdump()`
+emits tables alphabetically, not in foreign-key-safe order) is in
+`docs/ARCHITECTURE.md` §12.
 
 ### Table extraction is the weakest link
 

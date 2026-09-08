@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     chunk_overlap_tokens: int = 120
     max_upload_mb: int = 50
 
+    # If the facts table is empty on startup, load scripts/seed_demo.py's
+    # committed corpus instead of leaving the app looking broken. Only fires
+    # on emptiness -- see seed_on_empty_db() in main.py -- so a real corpus,
+    # local or deployed, is never touched by this.
+    seed_demo_on_empty_db: bool = True
+
     # server
     api_host: str = "127.0.0.1"
     api_port: int = 8000

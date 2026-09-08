@@ -97,10 +97,11 @@ cd backend
 pytest
 ```
 
-Nine tests cover ingestion, grounding and the review queue with the model
-stubbed, so they are deterministic and need no API key. Three more exercise the
-live relationship classifier on synthetic inputs; they **skip cleanly** when no
-key is configured or the daily free-tier quota is spent.
+28 tests. Most cover ingestion, quote grounding, evidence sufficiency, the
+review queue and model rotation with the model stubbed, so they are
+deterministic and need no API key. Three exercise the live relationship
+classifier on synthetic inputs; they **skip cleanly** when no key is configured
+or every model's daily free-tier quota is spent.
 
 ---
 
@@ -170,6 +171,36 @@ Crucially, the three axes that must be **machine-comparable** —
 the linking step filters and groups on them constantly. The open parts are the
 parts only humans and models read. Adding a new kind of fact costs one
 `INSERT`, not one migration.
+
+### Grounding is not the same as sufficiency
+
+Most systems that cite a source stop at "the quote exists". This one asks a
+second question, because the first is not enough.
+
+`verify_quote` proves a quote is a real substring of the document. It cannot
+tell that a quote of `Nil` does not support the sentence "Delhivery has no
+corrective action taken or underway on issues related to anti-competitive
+conduct" -- and that fact was stored with confidence 1.00, a real bounding box,
+and a green "grounded" flag.
+
+So every fact is also graded on whether the quote *carries* the claim: does it
+contain the value asserted, the subject, the period. Only components the fact
+actually asserts are checked. The result is three-valued -- full, partial,
+insufficient -- because a score like "0.62 grounded" invites false precision
+while three tiers map onto what a reviewer would do.
+
+The check is local string and number comparison, no model call. That is what
+made it possible to backfill across an already-ingested corpus: **335 facts
+assessed in 0.02 seconds with zero API calls.**
+
+| Strength | Facts |
+| --- | --- |
+| full | 129 |
+| partial | 103 |
+| insufficient | 103 |
+
+Under a third of extracted facts carry their own evidence. That was always
+true; it is now visible in the UI and queued for review instead of hidden.
 
 ### Why SQLite + brute-force cosine, not a vector database
 
@@ -253,16 +284,18 @@ rather than vague about what that means:
 
 ### Free-tier rate limits are the binding constraint
 
-This is the biggest practical limitation. Gemini's free tier caps requests
-**per model per day**, and one chunk is one call — a 100-page report is ~220
-calls. During development, eight different models were exhausted in a single
-day.
+Gemini's free tier caps requests **per model per day**, and one chunk is one
+call — a 100-page report is ~220 calls. During development, eight different
+models were exhausted in a single day.
 
-The pipeline handles this correctly rather than crashing: a daily-quota error
-stops the run immediately, writes **one** review entry naming how many chunks
-went unprocessed, and sets the document status to `extraction_incomplete`.
-`POST /documents/{id}/extract` resumes later. But it does mean a first-time
-grader should **start with a 10–15 page slice**, not a full report.
+The system now **rotates across a pool of models** when one exhausts its daily
+quota, so a single spent model no longer stops ingestion. `GET /health` reports
+which models are active and which are exhausted. If the whole pool is spent,
+the run stops cleanly, writes one review entry naming how many chunks went
+unprocessed, and `POST /documents/{id}/extract` resumes later.
+
+It still means a first-time reviewer should **start with a 10–15 page slice**
+rather than a full report.
 
 Concurrency does not rescue this. Bounded concurrency measured **3.08×** on a
 10-chunk burst (58.3s → 18.9s), but on a sustained 221-chunk run the per-chunk

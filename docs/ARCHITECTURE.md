@@ -78,6 +78,8 @@ All eight steps are implemented.
       link.py          cosine retrieval + batched relationship classification
       render.py        page PNG rendering, caching, and point->pixel scaling
       selfcheck.py     post-ingestion queries for ambiguous or borderline facts
+      grounding.py     does the quote SUPPORT the claim, not just exist in it
+      model_pool.py    rotate models when a daily free-tier quota is spent
       progress.py      in-memory phase/progress state for the SSE endpoint
       ingest_log.py    one JSONL line per run, for timing comparisons
       ingest.py        all eight steps wired together in one transaction
@@ -113,7 +115,8 @@ documents(id, filename, title, sha256, uploaded_at, page_count, status)
 chunks(id, document_id, page_start, page_end, text, token_count)
 facts(id, document_id, chunk_id, fact_type, subject, statement,
       normalized_value, unit, time_scope, quote, page_number,
-      bbox_x0, bbox_y0, bbox_x1, bbox_y1, confidence, created_at)
+      bbox_x0, bbox_y0, bbox_x1, bbox_y1, confidence, created_at,
+      evidence_strength, evidence_gaps)
 fact_attributes(id, fact_id, key, value)
 fact_types(name PRIMARY KEY, first_seen_at, example_fact_id, fact_count)
 embeddings(fact_id, vector BLOB, dim)
@@ -326,6 +329,69 @@ When no box is found, `page_number` is set from the chunk only if the chunk
 sits on a single page. For a multi-page chunk the page would be a guess, so it
 stays NULL rather than being invented.
 
+### Grounding is not the same as sufficiency
+
+`verify_quote()` answers one question: is this quote a real substring of the
+source? That catches invention and nothing else. It happily accepts a quote of
+`Nil` attached to the sentence "Delhivery has no corrective action taken or
+underway on issues related to anti-competitive conduct", because `Nil` really
+is in the document, in a table cell whose meaning comes from a row label and a
+column header the quote does not include.
+
+That fact was stored with `confidence: 1.00`, a real bounding box, and a
+`grounded: true` flag. Every signal the system had said it was fine.
+
+So there is a second question, asked in `services/grounding.py`: does the quote
+*support* the claim? A statement asserts a small number of components -- a
+subject, a value, a period -- and a quote is sufficient to the extent that it
+carries them. Only components the fact actually asserts are checked, so a fact
+that claims no period is not penalised for a quote lacking one.
+
+| Strength | Meaning |
+| --- | --- |
+| `full` | The quote states the claim on its own |
+| `partial` | The quote carries the value but leans on surrounding context |
+| `insufficient` | Read alone, the quote does not support the statement |
+
+Three implementation choices worth stating.
+
+**Local, not a model call.** The check is string and number comparison. It
+costs no quota, adds no latency, and returns the same answer every time -- which
+also means it could be backfilled across an already-ingested corpus. 335 facts
+were assessed in 0.02 seconds with zero API calls. Re-extracting them to get
+the same information would have cost hundreds.
+
+**Three tiers, not a score.** "0.62 grounded" invites false precision.
+full / partial / insufficient maps onto what a reviewer would actually do.
+
+**Numeric comparison, not string matching.** A quote reading `576,188.2` has to
+match a `normalized_value` of `576188.2`. Without comparing numerically the
+check reports the value absent and under-grades a correct extraction -- a real
+miss on this corpus before it was fixed.
+
+Two rules keep the check from flagging ordinary prose. Running text routinely
+omits or pronominalises its subject, so the subject is only required in short
+quotes where there is genuinely no way to tell what the text is about. And a
+document saying "the Company" has named its subject, so self-reference counts.
+
+Measured over the working corpus of 335 facts:
+
+| Strength | Facts |
+| --- | --- |
+| full | 129 |
+| partial | 103 |
+| insufficient | 103 |
+
+Insufficient facts are queued as `weak_evidence`, kept and visible rather than
+deleted, and both the fact list and the evidence viewer show the tier with the
+specific gaps spelled out. A grade alone tells a reviewer nothing; "missing the
+subject, the period, enough surrounding text to read as a claim" tells them
+what to check.
+
+The honest reading of that table is that under a third of extracted facts carry
+their own evidence. That number was always true. What changed is that it is now
+visible instead of hidden behind a green `grounded` flag.
+
 ### Nothing doubtful is discarded
 
 A fact that fails verification or scores low confidence is **still written to
@@ -338,6 +404,7 @@ the database — which is the whole reason the review queue exists.
 | `unverified_quote` | Quote is not a substring of the source chunk. The fact is not grounded in the document. |
 | `ungrounded_quote` | Quote verified against the chunk but could not be located in the PDF, so it has no bounding box. |
 | `low_confidence` | Model's own confidence is below `REVIEW_CONFIDENCE_THRESHOLD` (default 0.9). |
+| `weak_evidence` | The quote is real but does not support the claim on its own. |
 | `extraction_failed` | The model call failed for a chunk. Recorded against the chunk, so the gap in coverage is visible. |
 
 Both can apply to one fact, producing two rows.

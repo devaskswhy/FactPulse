@@ -160,6 +160,35 @@ export type Fact = {
   grounding: Grounding | null;
   attributes: FactAttribute[];
   created_at: string;
+  /**
+   * How much of the claim the quote actually carries. Distinct from
+   * `grounding`, which only proves the quote is a real substring of the
+   * source -- a table cell reading "Nil" is grounded and insufficient.
+   */
+  evidence_strength: "full" | "partial" | "insufficient" | null;
+  evidence_gaps: string[];
+};
+
+/** Badge styling for an evidence tier. */
+export const EVIDENCE_TIER: Record<
+  string,
+  { label: string; className: string; title: string }
+> = {
+  full: {
+    label: "full evidence",
+    className: "border-corroborate/40 bg-corroborate/10 text-corroborate",
+    title: "The quote states the claim on its own.",
+  },
+  partial: {
+    label: "partial evidence",
+    className: "border-accent/40 bg-accent/10 text-accent",
+    title: "The quote carries the value but relies on surrounding context.",
+  },
+  insufficient: {
+    label: "weak evidence",
+    className: "border-contradict/40 bg-contradict/10 text-contradict",
+    title: "On its own the quote does not support the statement.",
+  },
 };
 
 export type FactList = {

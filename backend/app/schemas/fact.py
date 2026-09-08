@@ -74,6 +74,18 @@ class Fact(FactBase):
     grounding: Grounding | None = None
     attributes: list[FactAttribute] = Field(default_factory=list)
     created_at: datetime
+    evidence_strength: str | None = Field(
+        None,
+        description=(
+            "How much of the claim the quote actually carries: full, partial, "
+            "or insufficient. Distinct from grounding, which only proves the "
+            "quote is a real substring of the source."
+        ),
+    )
+    evidence_gaps: list[str] = Field(
+        default_factory=list,
+        description="What the quote leaves out, in plain language.",
+    )
 
     model_config = {"from_attributes": True}
 
@@ -124,6 +136,13 @@ class ExtractionSummaryOut(BaseModel):
     )
     facts_low_confidence: int = Field(
         ..., ge=0, description="Facts below the review confidence threshold."
+    )
+    facts_weak_evidence: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Facts whose quote is real but does not support the claim on its own."
+        ),
     )
     review_items: int = Field(..., ge=0, description="Rows added to review_queue.")
     quota_exhausted: bool = Field(

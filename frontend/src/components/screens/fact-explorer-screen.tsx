@@ -5,6 +5,7 @@ import { gsap } from "gsap";
 
 import {
   ApiError,
+  EVIDENCE_TIER,
   getFacts,
   getSchema,
   type Fact,
@@ -288,6 +289,21 @@ export function FactExplorerScreen({
                         </div>
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-text-dim">
                           <span className="text-accent">{fact.fact_type}</span>
+                          {/* Evidence tier. Shown on every row because
+                              "grounded" without "sufficient" is misleading. */}
+                          {fact.evidence_strength &&
+                            fact.evidence_strength !== "full" && (
+                              <span
+                                className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                                  EVIDENCE_TIER[fact.evidence_strength]?.className ?? ""
+                                }`}
+                                title={
+                                  EVIDENCE_TIER[fact.evidence_strength]?.title ?? ""
+                                }
+                              >
+                                {EVIDENCE_TIER[fact.evidence_strength]?.label}
+                              </span>
+                            )}
                           {fact.subject && <span className="truncate">{fact.subject}</span>}
                           {fact.normalized_value && (
                             <span>

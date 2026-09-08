@@ -137,6 +137,18 @@ def delete_chunks(conn: sqlite3.Connection, document_id: int) -> int:
 # ---------------------------------------------------------------------- facts
 
 
+def _column(row: sqlite3.Row, name: str):
+    """Read a column that may not exist on rows from an older query.
+
+    Some joined queries select an explicit column list; this keeps _to_fact
+    usable against those without every caller having to be updated in lockstep.
+    """
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
 def _to_fact(row: sqlite3.Row, attributes: list[FactAttribute] | None = None) -> Fact:
     bbox = None
     if row["bbox_x0"] is not None:
@@ -162,6 +174,10 @@ def _to_fact(row: sqlite3.Row, attributes: list[FactAttribute] | None = None) ->
         created_at=row["created_at"],
         grounding=grounding,
         attributes=attributes or [],
+        evidence_strength=_column(row, "evidence_strength"),
+        evidence_gaps=[
+            g for g in (_column(row, "evidence_gaps") or "").split("; ") if g
+        ],
     )
 
 
@@ -180,17 +196,21 @@ def insert_fact(
     page_number: int | None,
     bbox: tuple[float, float, float, float] | None,
     confidence: float | None,
+    evidence_strength: str | None = None,
+    evidence_gaps: str | None = None,
 ) -> int:
     x0, y0, x1, y1 = bbox if bbox else (None, None, None, None)
     cur = conn.execute(
         "INSERT INTO facts (document_id, chunk_id, fact_type, subject, statement, "
         "normalized_value, unit, time_scope, quote, page_number, "
-        "bbox_x0, bbox_y0, bbox_x1, bbox_y1, confidence) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "bbox_x0, bbox_y0, bbox_x1, bbox_y1, confidence, "
+        "evidence_strength, evidence_gaps) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             document_id, chunk_id, fact_type, subject, statement,
             normalized_value, unit, time_scope, quote, page_number,
             x0, y0, x1, y1, confidence,
+            evidence_strength, evidence_gaps,
         ),
     )
     return int(cur.lastrowid)
@@ -814,3 +834,44 @@ def knowledge_layer_totals(conn: sqlite3.Connection) -> dict[str, int]:
         ),
         "open_review_items": one("SELECT COUNT(*) FROM review_queue WHERE resolved = 0"),
     }
+
+
+# --------------------------------------------------- evidence strength backfill
+
+
+def set_evidence_assessment(
+    conn: sqlite3.Connection, fact_id: int, strength: str, gaps: list[str]
+) -> None:
+    conn.execute(
+        "UPDATE facts SET evidence_strength = ?, evidence_gaps = ? WHERE id = ?",
+        (strength, "; ".join(gaps), fact_id),
+    )
+
+
+def facts_missing_evidence_assessment(
+    conn: sqlite3.Connection, document_id: int | None = None
+) -> list[sqlite3.Row]:
+    """Facts with no evidence_strength yet.
+
+    The assessment is a pure local computation, so backfilling costs nothing but
+    a table scan -- no model calls, no quota. That is what makes it safe to add
+    to a corpus that was already ingested.
+    """
+    where = "WHERE evidence_strength IS NULL"
+    params: tuple = ()
+    if document_id is not None:
+        where += " AND document_id = ?"
+        params = (document_id,)
+    return conn.execute(
+        f"SELECT id, statement, quote, subject, normalized_value, unit, time_scope "
+        f"FROM facts {where}",
+        params,
+    ).fetchall()
+
+
+def evidence_strength_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT COALESCE(evidence_strength, 'unassessed') AS s, COUNT(*) AS n "
+        "FROM facts GROUP BY s"
+    ).fetchall()
+    return {r["s"]: r["n"] for r in rows}

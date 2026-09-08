@@ -32,6 +32,7 @@ from app.services.extract import (
     build_client,
     extract_chunks_concurrently,
 )
+from app.services import grounding
 from app.services.pdf import locate_quote_bbox, verify_quote
 from app.services.progress import ProgressTracker
 
@@ -44,6 +45,7 @@ ISSUE_LOW_CONFIDENCE = "low_confidence"
 ISSUE_UNGROUNDED_QUOTE = "ungrounded_quote"
 ISSUE_EXTRACTION_FAILED = "extraction_failed"
 ISSUE_QUOTA_EXHAUSTED = "quota_exhausted"
+ISSUE_WEAK_EVIDENCE = "weak_evidence"
 
 
 @dataclass
@@ -55,6 +57,7 @@ class ExtractionSummary:
     facts_grounded: int = 0        # quote verified AND located in the PDF
     facts_unverified: int = 0      # quote not found in the chunk
     facts_low_confidence: int = 0  # below the review threshold
+    facts_weak_evidence: int = 0   # quote real, but does not support the claim
     review_items: int = 0
     quota_exhausted: bool = False
     fact_types: set[str] = field(default_factory=set)
@@ -68,6 +71,7 @@ class ExtractionSummary:
             "facts_grounded": self.facts_grounded,
             "facts_unverified": self.facts_unverified,
             "facts_low_confidence": self.facts_low_confidence,
+            "facts_weak_evidence": self.facts_weak_evidence,
             "review_items": self.review_items,
             "quota_exhausted": self.quota_exhausted,
             "fact_types": sorted(self.fact_types),
@@ -107,6 +111,20 @@ def _persist_fact(
         # NULL rather than being invented.
         page_number = chunk.page_start
 
+    # --- step 2b: is the quote ENOUGH, not just real? ----------------------
+    # verify_quote proves the quote exists in the source. It says nothing about
+    # whether the quote supports the claim -- a table cell reading "Nil" is a
+    # real substring and supports almost nothing. Assessed locally, so this
+    # costs no model call.
+    assessment = grounding.assess(
+        statement=fact.statement,
+        quote=quote_to_store,
+        subject=fact.subject or None,
+        normalized_value=fact.normalized_value,
+        unit=fact.unit,
+        time_scope=fact.time_scope,
+    )
+
     fact_id = repo.insert_fact(
         conn,
         document_id=document.id,
@@ -121,6 +139,8 @@ def _persist_fact(
         page_number=page_number,
         bbox=bbox,
         confidence=fact.confidence,
+        evidence_strength=assessment.strength,
+        evidence_gaps="; ".join(assessment.gaps),
     )
 
     # --- step 3: EAV attributes and the type registry ----------------------
@@ -163,6 +183,22 @@ def _persist_fact(
         summary.review_items += 1
     else:
         summary.facts_grounded += 1
+
+    # A quote that does not support its claim is a different failure from a
+    # quote that was invented, and needs a different fix, so it gets its own
+    # issue type rather than being folded into unverified_quote.
+    if quote_ok and assessment.is_weak:
+        summary.facts_weak_evidence += 1
+        repo.insert_review_item(
+            conn,
+            fact_id=fact_id,
+            chunk_id=chunk.id,
+            issue_type=ISSUE_WEAK_EVIDENCE,
+            note=(
+                f"{assessment.reason()} Quote: {quote_to_store[:160]!r}"
+            ),
+        )
+        summary.review_items += 1
 
     if fact.confidence < settings.review_confidence_threshold:
         summary.facts_low_confidence += 1
@@ -392,3 +428,56 @@ def reground_document_facts(
 
     logger.info("re-grounded document %s: %s", document.id, result)
     return result
+
+
+def assess_evidence_backfill(
+    conn: sqlite3.Connection, document_id: int | None = None
+) -> dict[str, int]:
+    """Assess evidence strength for facts that do not have it yet.
+
+    Pure local computation, so this can be run over an already-ingested corpus
+    without spending a single model call. That is the point: the check was
+    added after the corpus existed, and re-extracting 335 facts to get it would
+    have cost hundreds of API calls for information already in the database.
+
+    Weak results are queued for review, deduplicated so a repeat run does not
+    stack rows on the same fact.
+    """
+    counts = {"assessed": 0, "full": 0, "partial": 0, "insufficient": 0, "queued": 0}
+
+    for row in repo.facts_missing_evidence_assessment(conn, document_id):
+        assessment = grounding.assess(
+            statement=row["statement"],
+            quote=row["quote"],
+            subject=row["subject"],
+            normalized_value=row["normalized_value"],
+            unit=row["unit"],
+            time_scope=row["time_scope"],
+        )
+        repo.set_evidence_assessment(
+            conn, row["id"], assessment.strength, assessment.gaps
+        )
+        counts["assessed"] += 1
+        counts[assessment.strength] += 1
+
+        if assessment.is_weak:
+            already = conn.execute(
+                "SELECT 1 FROM review_queue WHERE fact_id = ? AND issue_type = ? "
+                "AND resolved = 0 LIMIT 1",
+                (row["id"], ISSUE_WEAK_EVIDENCE),
+            ).fetchone()
+            if not already:
+                repo.insert_review_item(
+                    conn,
+                    fact_id=row["id"],
+                    chunk_id=None,
+                    issue_type=ISSUE_WEAK_EVIDENCE,
+                    note=(
+                        f"{assessment.reason()} "
+                        f"Quote: {(row['quote'] or '')[:160]!r}"
+                    ),
+                )
+                counts["queued"] += 1
+
+    logger.info("evidence backfill: %s", counts)
+    return counts

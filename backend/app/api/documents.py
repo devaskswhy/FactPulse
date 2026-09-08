@@ -27,7 +27,11 @@ from app.services.ingest import EmptyPdfError, ingest_pdf, rechunk_document
 from app.services.pdf import PdfParseError
 from app.services.embed import EmbeddingError
 from app.services.link import link_document_facts
-from app.services.pipeline import extract_document_facts, reground_document_facts
+from app.services.pipeline import (
+    assess_evidence_backfill,
+    extract_document_facts,
+    reground_document_facts,
+)
 from app.services.render import PageRenderError, render_page
 from app.services.selfcheck import run_self_check
 
@@ -350,3 +354,22 @@ def reground(
     """
     document = _require_document(conn, document_id)
     return reground_document_facts(conn, document)
+
+
+@router.post(
+    "/assess-evidence",
+    summary="Assess evidence strength for facts that lack it",
+)
+def assess_evidence(
+    document_id: int | None = Query(
+        None, description="Restrict to one document. Omit for the whole layer."
+    ),
+    conn: sqlite3.Connection = Depends(db_dependency),
+) -> dict[str, int]:
+    """Backfill the quote-sufficiency assessment.
+
+    Uses no model calls, so it is free to run over an existing corpus. New
+    facts are assessed at ingestion time; this exists for facts extracted
+    before the check was added.
+    """
+    return assess_evidence_backfill(conn, document_id)

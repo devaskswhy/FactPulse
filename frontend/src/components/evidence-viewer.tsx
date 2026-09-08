@@ -5,6 +5,7 @@ import { gsap } from "gsap";
 
 import {
   ApiError,
+  EVIDENCE_TIER,
   getEvidence,
   pageImageUrl,
   type EvidenceBundle,
@@ -164,14 +165,37 @@ export function EvidenceViewer({ factId, onClose }: Props) {
 
         {evidence.quote && (
           <div className="mt-6">
-            <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-text-dim">
-              Verbatim source
-            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-text-dim">
+                Verbatim source
+              </p>
+              {fact.evidence_strength && (
+                <span
+                  className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+                    EVIDENCE_TIER[fact.evidence_strength]?.className ?? ""
+                  }`}
+                >
+                  {EVIDENCE_TIER[fact.evidence_strength]?.label}
+                </span>
+              )}
+            </div>
             {/* Amber bar, matching the highlight on the page, so the two read
                 as the same thing seen twice. */}
             <blockquote className="mt-2 border-l-2 border-accent bg-surface/60 px-4 py-3 text-sm leading-relaxed text-text">
               {evidence.quote}
             </blockquote>
+
+            {/* Saying WHY the evidence is thin is the useful part. A grade on
+                its own tells a reviewer nothing they can act on. */}
+            {fact.evidence_gaps.length > 0 && (
+              <p className="mt-2 text-xs leading-relaxed text-text-dim">
+                Read alone, this quote is missing{" "}
+                <span className="text-text">
+                  {fact.evidence_gaps.join(", ")}
+                </span>
+                . The claim relies on surrounding context in the document.
+              </p>
+            )}
           </div>
         )}
 

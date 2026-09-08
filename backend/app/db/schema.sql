@@ -61,7 +61,13 @@ CREATE TABLE IF NOT EXISTS facts (
     bbox_x1          REAL,
     bbox_y1          REAL,
     confidence       REAL,
-    created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    -- How much of the claim the quote actually carries: full | partial |
+    -- insufficient. verify_quote only proves the quote is REAL; this records
+    -- whether it is ENOUGH. See services/grounding.py.
+    evidence_strength TEXT,
+    -- Plain-language list of what the quote leaves out, joined by '; '.
+    evidence_gaps     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_facts_document_id ON facts(document_id);

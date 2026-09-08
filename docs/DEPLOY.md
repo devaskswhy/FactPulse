@@ -15,11 +15,17 @@ before treating the deployed URL as long-lived.
 ## 1. Backend — Railway
 
 1. **New Project → Deploy from GitHub repo**, select this repository.
-2. Railway will try to build from the repo root. This is a monorepo, so in the
-   service's **Settings → Root Directory**, set it to `backend`. Once set,
-   Railway reads `backend/railway.json` (already committed) for the build and
-   start command — Nixpacks auto-detects Python from `requirements.txt`, and
-   the start command is pinned explicitly:
+2. Railway will try to build from the repo root and fail — this is a
+   monorepo, and its builder (Railpack) lists `backend/`, `frontend/`,
+   `samples/` as siblings with nothing to build at that level. Open the
+   service → **Settings** tab → **Source** section → **Root Directory**
+   field → type `backend` → it saves on blur (no separate save button).
+   Then trigger a new deploy manually (Deployments tab → ⋮ → Redeploy, or
+   push any commit) — changing Root Directory does not automatically
+   rebuild the deployment that already failed. Once set, Railway builds
+   from inside `backend/`, auto-detects Python from `requirements.txt`, and
+   reads `backend/railway.json` (already committed) for the start command,
+   pinned explicitly so it is not left to auto-detection:
 
    ```
    uvicorn app.main:app --host 0.0.0.0 --port $PORT

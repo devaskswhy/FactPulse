@@ -1,5 +1,7 @@
 # FactPulse
 
+[![CI](https://github.com/devaskswhy/FactPulse/actions/workflows/ci.yml/badge.svg)](https://github.com/devaskswhy/FactPulse/actions/workflows/ci.yml)
+
 A **fact knowledge layer**. FactPulse extracts facts from PDFs, grounds each
 one in the exact source span it came from, and detects whether facts across
 documents **corroborate**, **contradict**, can be **reconciled** through

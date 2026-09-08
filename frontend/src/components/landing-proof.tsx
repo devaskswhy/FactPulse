@@ -193,7 +193,7 @@ export function LandingProof() {
 
   return (
     <section ref={rootRef} className="border-t border-border bg-surface/20">
-      <div className="mx-auto max-w-4xl px-6 py-16 md:px-10 md:py-20">
+      <div className="mx-auto max-w-7xl px-6 py-16 md:px-10 md:py-20">
         <p className="font-mono text-xs uppercase tracking-[0.3em] text-accent">
           Not a mockup
         </p>
@@ -202,7 +202,7 @@ export function LandingProof() {
         </h2>
 
         {/* Headline stats */}
-        <div className="mt-10 grid grid-cols-2 gap-x-6 gap-y-8 sm:grid-cols-4">
+        <div className="mt-10 grid grid-cols-2 gap-x-6 gap-y-8 sm:grid-cols-4 lg:gap-x-10">
           <StatBlock value={totals.documents} label="source documents" />
           <StatBlock value={totals.facts} label="facts extracted" />
           <StatBlock
@@ -212,7 +212,7 @@ export function LandingProof() {
           <StatBlock value={totals.fact_types} label="fact types discovered" />
         </div>
 
-        <div className="mt-14 grid gap-10 md:grid-cols-2">
+        <div className="mt-14 grid gap-10 md:grid-cols-2 lg:gap-14">
           {/* Verdict distribution */}
           <div>
             <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-text-dim">
@@ -245,7 +245,7 @@ export function LandingProof() {
           <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-text-dim">
             What most extraction pipelines skip
           </p>
-          <div data-proof-compare-list className="mt-5 space-y-4">
+          <div data-proof-compare-list className="mt-5 grid gap-4 lg:grid-cols-2">
             {COMPARISON.map((row, i) => (
               <div
                 key={i}

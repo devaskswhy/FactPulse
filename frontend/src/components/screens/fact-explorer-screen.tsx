@@ -7,11 +7,9 @@ import {
   ApiError,
   EVIDENCE_TIER,
   getFacts,
-  getSchema,
   type Fact,
   type FactList,
   type KnowledgeLayerTotals,
-  type SchemaResponse,
 } from "@/lib/api";
 import { DURATION, STAGGER, prefersReducedMotion } from "@/lib/motion";
 import { ComparisonCard } from "@/components/comparison-card";
@@ -30,11 +28,14 @@ export function FactExplorerScreen({
   refreshKey?: number;
 }) {
   const [data, setData] = useState<FactList | null>(null);
-  const [schema, setSchema] = useState<SchemaResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [factType, setFactType] = useState<string | null>(null);
+  const [subject, setSubject] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [group, setGroup] = useState<GroupMode>("document");
+  // Which group headers are open. Everything starts closed: 335 facts
+  // expanded on load is a wall to scroll past, not a list to read.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Fact | null>(null);
   const [tab, setTab] = useState<"evidence" | "relationships">("evidence");
   const [relationCounts, setRelationCounts] = useState<Record<number, number>>({});
@@ -49,7 +50,7 @@ export function FactExplorerScreen({
     // synchronously here is a cascading render, and a stale error vanishing
     // the instant new data lands reads the same to a user.
     let cancelled = false;
-    getFacts({ document_id: documentId, fact_type: factType, limit: 300 })
+    getFacts({ document_id: documentId, fact_type: factType, subject, limit: 300 })
       .then((result) => {
         if (!cancelled) {
           setData(result);
@@ -65,15 +66,7 @@ export function FactExplorerScreen({
     return () => {
       cancelled = true;
     };
-  }, [documentId, factType, refreshKey]);
-
-  useEffect(() => {
-    getSchema()
-      .then(setSchema)
-      .catch(() => {
-        /* chips degrade to absent */
-      });
-  }, [refreshKey]);
+  }, [documentId, factType, subject, refreshKey]);
 
   // Relationship badges. One request for the whole corpus rather than one per
   // fact: /facts already tells us which document each fact is in, and the
@@ -161,6 +154,22 @@ export function FactExplorerScreen({
       .map(([key, facts]) => ({ key, label: key, variants: 0, facts }));
   }, [visible, group, data]);
 
+  // Switching the grouping dimension, the document, or a filter makes
+  // previously-open sections meaningless, so those reset. A plain data
+  // refresh does not -- that would slam shut whatever the reader had just
+  // opened. Done during render rather than in an effect: an effect would
+  // render once with the stale set and then again to correct it.
+  //
+  // The reset opens the largest group rather than none of them. All-closed
+  // was the honest reading of "keep it clean initially", but it lands the
+  // reader on a screen with nothing on it to read.
+  const filterSignature = `${group}|${documentId}|${factType}|${subject}`;
+  const [previousSignature, setPreviousSignature] = useState<string | null>(null);
+  if (filterSignature !== previousSignature && groups.length) {
+    setPreviousSignature(filterSignature);
+    setExpanded(new Set(groups[0].key ? [groups[0].key] : []));
+  }
+
   // Stagger on load and on every filter change, capped so a 300-fact list does
   // not crawl. 300ms total budget, per the app-shell motion rule.
   useLayoutEffect(() => {
@@ -221,40 +230,11 @@ export function FactExplorerScreen({
             </div>
           </div>
 
-          {/* Filter chips, generated from the live schema -- never hardcoded,
-              because the vocabulary grows with every document. */}
-          {schema && schema.fact_types.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {schema.fact_types.slice(0, 18).map((type) => {
-                const active = factType === type.name;
-                return (
-                  <button
-                    key={type.name}
-                    type="button"
-                    onClick={() => setFactType(active ? null : type.name)}
-                    className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] transition-colors duration-200 ${
-                      active
-                        ? "border-accent bg-accent/15 text-accent"
-                        : "border-border text-text-dim hover:border-text-dim hover:text-text"
-                    }`}
-                  >
-                    {type.name}
-                    <span className="ml-1.5 opacity-60">{type.fact_count}</span>
-                  </button>
-                );
-              })}
-              {schema.fact_types.length > 18 && (
-                <span className="self-center font-mono text-[11px] text-text-dim">
-                  +{schema.fact_types.length - 18} more in the panel →
-                </span>
-              )}
-            </div>
-          )}
-
           <p className="mt-3 font-mono text-[11px] text-text-dim">
             {visible.length} of {data?.total ?? 0} facts ·{" "}
             {data?.scope === "document" ? "this document" : "whole knowledge layer"}
             {factType && <span className="text-accent"> · {factType}</span>}
+            {subject && <span className="text-accent"> · {subject}</span>}
             {totals && data?.scope !== "document" && (
               <span> · {totals.cross_document_relationships} cross-document links</span>
             )}
@@ -270,28 +250,49 @@ export function FactExplorerScreen({
           {data && visible.length === 0 && (
             <p className="px-5 py-6 text-sm text-text-dim">
               No facts match. {search && "Try a different search, or "}
-              {factType ? "clear the type filter." : "upload a document to start."}
+              {factType || subject
+                ? "clear the filter in the panel."
+                : "upload a document to start."}
             </p>
           )}
 
-          {groups.map((bucket) => (
+          {groups.map((bucket) => {
+            // A single unlabelled bucket is group="none": there is no header
+            // to click, so it is always open.
+            const isOpen = !bucket.label || expanded.has(bucket.key);
+            return (
             <section key={bucket.key || "all"}>
               {bucket.label && (
-                <h3 className="sticky top-0 z-10 border-b border-border bg-bg/95 px-5 py-2 font-mono text-[11px] uppercase tracking-[0.2em] text-text-dim backdrop-blur">
-                  {bucket.label}
-                  <span className="ml-2 opacity-60">{bucket.facts.length}</span>
-                  {/* Proof the fold did something: this entity was written
-                      more than one way and the group still landed as one. */}
-                  {bucket.variants > 1 && (
-                    <span
-                      className="ml-2 rounded border border-accent/40 px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-accent"
-                      title="Raw subject spellings merged into this group"
-                    >
-                      {bucket.variants} spellings merged
-                    </span>
-                  )}
+                <h3 className="sticky top-0 z-10 border-b border-border bg-bg/95 backdrop-blur">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpanded((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(bucket.key)) next.delete(bucket.key);
+                        else next.add(bucket.key);
+                        return next;
+                      })
+                    }
+                    className="flex w-full items-center gap-2 px-5 py-2 text-left font-mono text-[11px] uppercase tracking-[0.2em] text-text-dim transition-colors duration-200 hover:text-text"
+                  >
+                    <span className="text-accent">{isOpen ? "−" : "+"}</span>
+                    <span className="truncate">{bucket.label}</span>
+                    <span className="opacity-60">{bucket.facts.length}</span>
+                    {/* Proof the fold did something: this entity was written
+                        more than one way and the group still landed as one. */}
+                    {bucket.variants > 1 && (
+                      <span
+                        className="rounded border border-accent/40 px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-accent"
+                        title="Raw subject spellings merged into this group"
+                      >
+                        {bucket.variants} spellings merged
+                      </span>
+                    )}
+                  </button>
                 </h3>
               )}
+              {isOpen && (
               <ul>
                 {bucket.facts.map((fact) => {
                   const active = open?.id === fact.id;
@@ -369,8 +370,10 @@ export function FactExplorerScreen({
                   );
                 })}
               </ul>
+              )}
             </section>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -428,8 +431,10 @@ export function FactExplorerScreen({
 
       {!open && (
         <TaxonomyPanel
-          selected={factType}
-          onSelect={setFactType}
+          selectedType={factType}
+          onSelectType={setFactType}
+          selectedSubject={subject}
+          onSelectSubject={setSubject}
           refreshKey={refreshKey}
         />
       )}

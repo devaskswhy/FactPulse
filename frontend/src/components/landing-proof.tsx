@@ -219,7 +219,7 @@ export function LandingProof() {
               How facts relate, across documents
             </p>
             <div className="mt-4">
-              <VerdictBars counts={totals.relationships_by_type} />
+              <VerdictBars counts={totals.relationships_by_type ?? {}} />
             </div>
           </div>
 
@@ -229,7 +229,7 @@ export function LandingProof() {
               Evidence strength, graded on every fact
             </p>
             <div className="mt-4">
-              <EvidenceBar counts={totals.evidence_by_strength} />
+              <EvidenceBar counts={totals.evidence_by_strength ?? {}} />
             </div>
             <p className="mt-3 text-xs leading-relaxed text-text-dim">
               A verified quote is not the same as a sufficient one — a table

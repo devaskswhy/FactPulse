@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.core.config import settings
 from app.db.database import table_names
 from app.schemas.health import HealthResponse
+from app.services.model_pool import pool_status
 
 router = APIRouter(tags=["system"])
 
@@ -28,4 +29,5 @@ def health() -> HealthResponse:
         database=db_status,
         tables=tables,
         gemini_configured=settings.gemini_configured,
+        model_pool=pool_status(),
     )

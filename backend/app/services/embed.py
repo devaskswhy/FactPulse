@@ -107,6 +107,9 @@ def embed_texts(
                 break
             except Exception as exc:
                 if _is_daily_quota(exc):
+                    # Embedding quota is metered separately from generate
+                    # quota, so the generate model pool cannot help here.
+                    # There is exactly one embedding model configured.
                     raise EmbeddingError(
                         f"daily embedding quota exhausted for "
                         f"{settings.gemini_embedding_model}: {exc}"

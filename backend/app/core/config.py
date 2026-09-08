@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     # Gemini
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.6-flash"
+    # Ordered fallbacks, tried in turn when a model's DAILY quota is spent.
+    # Free-tier quota is per model per day, so one name is one point of
+    # failure -- a reviewer's first upload would look broken rather than
+    # rate-limited. Comma-separated in the environment.
+    gemini_model_fallbacks: str = (
+        "gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash,"
+        "gemini-3.5-flash,gemini-3-flash-preview,gemini-3.1-flash-lite,"
+        "gemini-flash-latest"
+    )
     gemini_embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 768
 
@@ -81,6 +90,10 @@ class Settings(BaseSettings):
     def page_cache_path(self) -> Path:
         p = Path(self.page_cache_dir)
         return p if p.is_absolute() else BACKEND_DIR / p
+
+    @property
+    def fallback_models(self) -> list[str]:
+        return [m.strip() for m in self.gemini_model_fallbacks.split(",") if m.strip()]
 
     @property
     def gemini_configured(self) -> bool:

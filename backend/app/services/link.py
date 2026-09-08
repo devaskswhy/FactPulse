@@ -29,6 +29,7 @@ from google.genai import types
 
 from app.core.config import settings
 from app.db import repository as repo
+from app.services import model_pool
 from app.services.embed import (
     EmbeddingError,
     cosine_against_matrix,
@@ -411,17 +412,21 @@ def classify_candidates(
 
     attempts = max(1, settings.extraction_max_attempts)
     for attempt in range(attempts):
+        model = model_pool.current_model()
         try:
             response = client.models.generate_content(
-                model=settings.gemini_model,
+                model=model,
                 contents=_render_request(row_a, candidates),
                 config=config,
             )
             break
         except Exception as exc:
             if _is_daily_quota(exc):
+                nxt = model_pool.mark_exhausted(model)
+                if nxt is not None:
+                    continue
                 raise QuotaExhaustedError(
-                    f"daily Gemini quota exhausted for {settings.gemini_model}: {exc}"
+                    f"daily Gemini quota exhausted for every model in the pool: {exc}"
                 ) from exc
             if attempt == attempts - 1 or not _is_retryable(exc):
                 raise ExtractionError(f"classification failed: {exc}") from exc

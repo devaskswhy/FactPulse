@@ -14,6 +14,15 @@ class HealthResponse(BaseModel):
     gemini_configured: bool = Field(
         ..., description="True when GEMINI_API_KEY is set in the environment."
     )
+    model_pool: dict = Field(
+        default_factory=dict,
+        description=(
+            "Generate-model rotation state: the configured pool, which model is "
+            "active, and which have exhausted their daily quota. Free-tier quota "
+            "is per model per day, so this is the first thing to check when "
+            "ingestion stops producing facts."
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {

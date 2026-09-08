@@ -31,6 +31,7 @@ from google import genai
 from google.genai import types
 
 from app.core.config import settings
+from app.services import model_pool
 
 logger = logging.getLogger(__name__)
 
@@ -301,9 +302,10 @@ def extract_facts_from_chunk(
     attempts = max(1, settings.extraction_max_attempts)
     last: Exception | None = None
     for attempt in range(attempts):
+        model = model_pool.current_model()
         try:
             response = client.models.generate_content(
-                model=settings.gemini_model,
+                model=model,
                 contents=USER_TEMPLATE.format(chunk_text=chunk_text),
                 config=config,
             )
@@ -311,8 +313,15 @@ def extract_facts_from_chunk(
         except Exception as exc:
             last = exc
             if _is_daily_quota(exc):
+                # This model is done for the day. Move to the next one in the
+                # pool and retry immediately rather than failing the chunk --
+                # a spent daily quota is a configuration fact, not an error in
+                # the document being processed.
+                nxt = model_pool.mark_exhausted(model)
+                if nxt is not None:
+                    continue
                 raise QuotaExhaustedError(
-                    f"daily Gemini quota exhausted for {settings.gemini_model}: {exc}"
+                    f"daily Gemini quota exhausted for every model in the pool: {exc}"
                 ) from exc
             if attempt == attempts - 1 or not _is_retryable(exc):
                 raise ExtractionError(f"Gemini call failed: {exc}") from exc

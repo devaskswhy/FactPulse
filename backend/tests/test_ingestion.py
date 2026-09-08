@@ -46,7 +46,10 @@ def stubbed(monkeypatch):
 
     def _install(facts: list[ExtractedFact]):
         monkeypatch.setattr(pipeline, "extract_chunks_concurrently", stub_model(facts))
-        monkeypatch.setattr(pipeline, "build_client", lambda *a, **k: object())
+        # No client to stub any more. The pipeline builds one per (key, model)
+        # slot at the point of the call rather than pinning one for the run, so
+        # its only preflight is that a key is configured at all -- which the
+        # isolated_store fixture arranges with a placeholder.
 
     return _install
 

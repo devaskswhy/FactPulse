@@ -29,7 +29,6 @@ from app.services.extract import (
     ExtractedFact,
     ExtractionError,
     QuotaExhaustedError,
-    build_client,
     extract_chunks_concurrently,
 )
 from app.services import grounding
@@ -248,7 +247,14 @@ def extract_document_facts(
     if not chunks:
         return summary
 
-    client = build_client()  # raises ExtractionError when no key is configured
+    # Deliberately no client here. Building one would pin its KEY for the whole
+    # document, so a daily quota that ran out mid-run could not rotate to the
+    # next key. Each call resolves its own slot; this only checks a key exists
+    # at all, which is the failure worth reporting up front.
+    if not settings.gemini_configured:
+        raise ExtractionError(
+            "GEMINI_API_KEY is not set -- create backend/.env from .env.example"
+        )
     pdf_path = settings.upload_path / f"{document.sha256}.pdf"
     if not pdf_path.exists():
         logger.warning(
@@ -285,7 +291,6 @@ def extract_document_facts(
 
     results = extract_chunks_concurrently(
         [(c.id, c.text) for c in chunks],
-        client=client,
         on_result=on_result,
     )
 

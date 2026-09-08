@@ -25,6 +25,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable
 
 from google import genai
@@ -238,13 +239,30 @@ USER_TEMPLATE = """Extract the facts stated in the following source text.
 # ------------------------------------------------------------------ the call
 
 
+@lru_cache(maxsize=8)
+def _client_for_key(api_key: str) -> genai.Client:
+    """One client per key, reused.
+
+    Cached because the pipeline now switches keys mid-run when a daily quota
+    runs out, and rebuilding a client per call would put connection setup on
+    the hot path of every chunk.
+    """
+    return genai.Client(api_key=api_key)
+
+
 def build_client(api_key: str | None = None) -> genai.Client:
-    key = api_key or settings.gemini_api_key
+    """A client for a specific key, or for the first configured one."""
+    key = api_key or (settings.api_keys[0] if settings.api_keys else None)
     if not key:
         raise ExtractionError(
             "GEMINI_API_KEY is not set -- create backend/.env from .env.example"
         )
-    return genai.Client(api_key=key)
+    return _client_for_key(key)
+
+
+def client_for(slot: "model_pool.Slot") -> genai.Client:
+    """The client a slot's calls should go through."""
+    return _client_for_key(slot.api_key)
 
 
 def _coerce_attributes(raw: object) -> dict[str, str]:
@@ -287,8 +305,6 @@ def extract_facts_from_chunk(
     if not chunk_text or not chunk_text.strip():
         return []
 
-    client = client or build_client()
-
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
         response_mime_type="application/json",
@@ -302,10 +318,17 @@ def extract_facts_from_chunk(
     attempts = max(1, settings.extraction_max_attempts)
     last: Exception | None = None
     for attempt in range(attempts):
-        model = model_pool.current_model()
+        # Resolved per attempt, not once: a quota that ran out on the previous
+        # attempt has already been recorded, so this picks up the next key or
+        # model without the caller arranging anything.
+        slot = model_pool.current_slot()
+        if slot is None:
+            raise QuotaExhaustedError(
+                "daily Gemini quota is exhausted for every key and model configured"
+            )
         try:
-            response = client.models.generate_content(
-                model=model,
+            response = (client or client_for(slot)).models.generate_content(
+                model=slot.model,
                 contents=USER_TEMPLATE.format(chunk_text=chunk_text),
                 config=config,
             )
@@ -313,15 +336,16 @@ def extract_facts_from_chunk(
         except Exception as exc:
             last = exc
             if _is_daily_quota(exc):
-                # This model is done for the day. Move to the next one in the
-                # pool and retry immediately rather than failing the chunk --
+                # This key/model pair is done for the day. Move to the next
+                # pair and retry immediately rather than failing the chunk --
                 # a spent daily quota is a configuration fact, not an error in
                 # the document being processed.
-                nxt = model_pool.mark_exhausted(model)
-                if nxt is not None:
+                model_pool.mark_exhausted(slot)
+                if model_pool.current_slot() is not None:
                     continue
                 raise QuotaExhaustedError(
-                    f"daily Gemini quota exhausted for every model in the pool: {exc}"
+                    f"daily Gemini quota exhausted for every key and model "
+                    f"in the pool: {exc}"
                 ) from exc
             if attempt == attempts - 1 or not _is_retryable(exc):
                 raise ExtractionError(f"Gemini call failed: {exc}") from exc
@@ -432,7 +456,6 @@ def extract_chunks_concurrently(
     if not chunks:
         return []
 
-    client = client or build_client()
     workers = max(1, concurrency or settings.extraction_concurrency)
     workers = min(workers, len(chunks))
 

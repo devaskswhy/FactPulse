@@ -22,8 +22,18 @@ class Settings(BaseSettings):
     app_name: str = "FactPulse"
     version: str = "0.1.0"
 
-    # Gemini
+    # Gemini.
+    #
+    # Free-tier quota is per PROJECT per model per day, and a key belongs to a
+    # project, so a key from a second Google account is an independent daily
+    # allowance rather than a second slice of the same one. Numbered slots
+    # rather than one comma-separated variable because these are 40-character
+    # opaque strings and a reviewer has to be able to see which is which.
     gemini_api_key: str | None = None
+    gemini_api_key_2: str | None = None
+    gemini_api_key_3: str | None = None
+    # Overflow, for anyone wanting more than three. Comma-separated.
+    gemini_api_keys: str = ""
     gemini_model: str = "gemini-3.6-flash"
     # Ordered fallbacks, tried in turn when a model's DAILY quota is spent.
     # Free-tier quota is per model per day, so one name is one point of
@@ -96,8 +106,29 @@ class Settings(BaseSettings):
         return [m.strip() for m in self.gemini_model_fallbacks.split(",") if m.strip()]
 
     @property
+    def api_keys(self) -> list[str]:
+        """Every configured key, in priority order, deduplicated.
+
+        Deduplication is not cosmetic. Two slots backed by the same key share
+        one quota, so a duplicate would make the pool advertise capacity it
+        does not have and turn one exhausted allowance into two dead slots.
+        """
+        candidates = [
+            self.gemini_api_key,
+            self.gemini_api_key_2,
+            self.gemini_api_key_3,
+            *self.gemini_api_keys.split(","),
+        ]
+        keys: list[str] = []
+        for candidate in candidates:
+            key = (candidate or "").strip()
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    @property
     def gemini_configured(self) -> bool:
-        return bool(self.gemini_api_key)
+        return bool(self.api_keys)
 
 
 @lru_cache

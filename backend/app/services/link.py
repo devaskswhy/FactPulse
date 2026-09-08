@@ -46,6 +46,7 @@ from app.services.extract import (
     _is_retryable,
     _retry_delay,
     build_client,
+    client_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -450,7 +451,6 @@ def classify_candidates(
     if not candidates:
         return {}
 
-    client = client or build_client()
     config = types.GenerateContentConfig(
         system_instruction=CLASSIFIER_SYSTEM,
         response_mime_type="application/json",
@@ -460,21 +460,26 @@ def classify_candidates(
 
     attempts = max(1, settings.extraction_max_attempts)
     for attempt in range(attempts):
-        model = model_pool.current_model()
+        slot = model_pool.current_slot()
+        if slot is None:
+            raise QuotaExhaustedError(
+                "daily Gemini quota is exhausted for every key and model configured"
+            )
         try:
-            response = client.models.generate_content(
-                model=model,
+            response = (client or client_for(slot)).models.generate_content(
+                model=slot.model,
                 contents=_render_request(row_a, candidates),
                 config=config,
             )
             break
         except Exception as exc:
             if _is_daily_quota(exc):
-                nxt = model_pool.mark_exhausted(model)
-                if nxt is not None:
+                model_pool.mark_exhausted(slot)
+                if model_pool.current_slot() is not None:
                     continue
                 raise QuotaExhaustedError(
-                    f"daily Gemini quota exhausted for every model in the pool: {exc}"
+                    f"daily Gemini quota exhausted for every key and model "
+                    f"in the pool: {exc}"
                 ) from exc
             if attempt == attempts - 1 or not _is_retryable(exc):
                 raise ExtractionError(f"classification failed: {exc}") from exc
@@ -601,11 +606,17 @@ def link_document_facts(
     judged together. See _classification_schema for why.
     """
     summary = LinkingSummary(document_id=document_id)
-    client = build_client()
+    # No client is built here. Pinning one for the whole run would pin its KEY
+    # too, so a quota that ran out mid-document could not rotate to the next
+    # key -- each call resolves its own slot instead.
+    if not settings.gemini_configured:
+        raise ExtractionError(
+            "GEMINI_API_KEY is not set -- create backend/.env from .env.example"
+        )
 
     if progress:
         progress.phase("embedding", "embedding new facts")
-    summary.facts_embedded = embed_document_facts(conn, document_id, client=client)
+    summary.facts_embedded = embed_document_facts(conn, document_id)
 
     facts = repo.list_facts(conn, document_id=document_id, limit=10_000)
 
@@ -676,7 +687,7 @@ def link_document_facts(
         summary.pairs_evaluated += len(candidate_rows)
 
         try:
-            verdicts = classify_candidates(row_a, candidate_rows, client=client)
+            verdicts = classify_candidates(row_a, candidate_rows)
         except QuotaExhaustedError:
             # Every remaining call would fail the same way. Stop and report
             # what was linked rather than grinding through the rest.

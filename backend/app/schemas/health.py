@@ -12,15 +12,17 @@ class HealthResponse(BaseModel):
         default_factory=list, description="Tables present in the SQLite database."
     )
     gemini_configured: bool = Field(
-        ..., description="True when GEMINI_API_KEY is set in the environment."
+        ..., description="True when at least one Gemini API key is configured."
     )
     model_pool: dict = Field(
         default_factory=dict,
         description=(
-            "Generate-model rotation state: the configured pool, which model is "
-            "active, and which have exhausted their daily quota. Free-tier quota "
-            "is per model per day, so this is the first thing to check when "
-            "ingestion stops producing facts."
+            "Quota rotation state. Free-tier quota is per project per model per "
+            "day and a key belongs to a project, so the unit that runs out is a "
+            "(key, model) pair -- `slots` is how many exist, `remaining` how "
+            "many still have quota, and `active` the one in use. Slots are "
+            "labelled key1/model; no key or fragment of one appears here. This "
+            "is the first thing to check when ingestion stops producing facts."
         ),
     )
 

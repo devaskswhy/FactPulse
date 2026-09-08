@@ -98,9 +98,9 @@ cd backend
 pytest
 ```
 
-59 tests. Most cover ingestion, quote grounding, evidence sufficiency,
-temporal ordering, supersession direction, the review queue and model rotation
-with the model stubbed, so they are deterministic and need no API key. Five
+64 tests. Most cover ingestion, quote grounding, evidence sufficiency,
+temporal ordering, supersession direction, the review queue and key/model
+rotation with the model stubbed, so they are deterministic and need no API key. Five
 exercise the live relationship classifier on synthetic inputs — including the
 brief's own resigned-director case — and they **skip cleanly** when no key is
 configured or every model's daily free-tier quota is spent.
@@ -324,15 +324,30 @@ rather than vague about what that means:
 
 ### Free-tier rate limits are the binding constraint
 
-Gemini's free tier caps requests **per model per day**, and one chunk is one
-call — a 100-page report is ~220 calls. During development, eight different
-models were exhausted in a single day.
+Gemini's free tier caps requests **per project, per model, per day**, and one
+chunk is one call — a 100-page report is ~220 calls. During development, eight
+different models were exhausted in a single day.
 
-The system now **rotates across a pool of models** when one exhausts its daily
-quota, so a single spent model no longer stops ingestion. `GET /health` reports
-which models are active and which are exhausted. If the whole pool is spent,
-the run stops cleanly, writes one review entry naming how many chunks went
-unprocessed, and `POST /documents/{id}/extract` resumes later.
+Because a key belongs to a project, the unit that runs out is the **(key,
+model) pair**, and that is what the pipeline rotates through. Keys are tried
+before models, so it stays on the preferred model as long as any key still has
+quota for it, and only then falls back to a lesser one. Three keys against
+seven models is 21 independent daily allowances.
+
+Configure as many as you have in `backend/.env` — only the first is required:
+
+```
+GEMINI_API_KEY=...
+GEMINI_API_KEY_2=...     # a key from a DIFFERENT Google account
+GEMINI_API_KEY_3=...
+```
+
+Keys from the same account share a project and therefore a quota, so a second
+key only helps if it comes from a second account. `GET /health` reports how
+many slots remain and which is active, labelled `key1/model-name` — never the
+key itself. If every slot is spent the run stops cleanly, writes one review
+entry naming how many chunks went unprocessed, and
+`POST /documents/{id}/extract` resumes later.
 
 It still means a first-time reviewer should **start with a 10–15 page slice**
 rather than a full report.

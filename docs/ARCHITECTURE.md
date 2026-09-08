@@ -596,7 +596,36 @@ quota in the error body (`GenerateRequestsPerDayPerProjectPerModel`), which is
 how the two are distinguished. A daily-quota error stops the linking run
 immediately rather than grinding through the remaining facts.
 
-Quotas are **per model**, so switching `GEMINI_MODEL` gives a fresh allowance.
+Quotas are metered **per project, per model, per day**, and an API key belongs
+to a project. So the unit that actually runs out is neither a key nor a model
+but the **pair** of them, and that pair is what `services/model_pool.py` hands
+out as a `Slot`. Three keys against seven models is twenty-one independent
+daily allowances rather than seven.
+
+**Keys rotate before models.** Given models [A, B] and keys [1, 2, 3] the order
+is A/1, A/2, A/3, B/1, B/2, B/3. Every key is tried on the preferred model
+before the pipeline settles for a lesser one; exhausting one key across all its
+models first would degrade output quality while a fresh key still had the good
+model available.
+
+Two consequences shape the code. A client is **never pinned for the length of a
+run** — building one at the top of `ingest` or `link_document_facts` would pin
+its key too, so a quota that ran out mid-document could not rotate. Each call
+resolves its own slot and looks up a cached client for that key. And the
+exhausted set is process-global, keyed on `(key index, model)`: exhaustion is a
+property of the account and the day, not of one request, so a document that
+burns through a slot does not leave the next document to rediscover it.
+
+Embeddings get the same treatment for half the reason. There is exactly one
+embedding model and no substitute, so the model fallbacks cannot help — but a
+second key still can, and `slot_for()` walks the keys for a single model.
+Embedding quota is metered separately from generate quota, so exhausting one
+says nothing about the other.
+
+`GET /health` reports slots as `key1/model-name`. **No key, and no fragment of
+one, appears in that payload or in any log line** — the endpoint is
+unauthenticated and its output is the sort of thing that gets pasted into an
+issue.
 
 ### Known limits
 

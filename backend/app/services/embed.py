@@ -23,12 +23,12 @@ from google import genai
 from google.genai import types
 
 from app.core.config import settings
+from app.services import model_pool
 from app.services.extract import (
-    ExtractionError,
     _is_daily_quota,
     _is_retryable,
     _retry_delay,
-    build_client,
+    client_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,10 +75,10 @@ def embed_texts(
     if not texts:
         return []
 
-    try:
-        client = client or build_client()
-    except ExtractionError as exc:  # same missing-key condition
-        raise EmbeddingError(str(exc)) from exc
+    if client is None and not settings.gemini_configured:
+        raise EmbeddingError(
+            "GEMINI_API_KEY is not set -- create backend/.env from .env.example"
+        )
 
     config = types.EmbedContentConfig(
         task_type="SEMANTIC_SIMILARITY",
@@ -97,22 +97,34 @@ def embed_texts(
         # we would wait through clears it.
         attempts = max(1, settings.extraction_max_attempts)
         response = None
+        embedding_model = settings.gemini_embedding_model
         for attempt in range(attempts):
+            # There is exactly one embedding model and no substitute for it, so
+            # the generate pool's fallbacks cannot help. A second KEY can,
+            # though -- quota is per project, so the same model on another key
+            # is a fresh allowance. slot_for walks the keys for one model.
+            slot = model_pool.slot_for(embedding_model)
+            if client is None and slot is None:
+                raise EmbeddingError(
+                    f"daily embedding quota exhausted for {embedding_model} "
+                    f"on every configured key"
+                )
             try:
-                response = client.models.embed_content(
-                    model=settings.gemini_embedding_model,
+                response = (client or client_for(slot)).models.embed_content(
+                    model=embedding_model,
                     contents=batch,
                     config=config,
                 )
                 break
             except Exception as exc:
                 if _is_daily_quota(exc):
-                    # Embedding quota is metered separately from generate
-                    # quota, so the generate model pool cannot help here.
-                    # There is exactly one embedding model configured.
+                    if slot is not None:
+                        model_pool.mark_exhausted(slot)
+                    if client is None and model_pool.slot_for(embedding_model):
+                        continue
                     raise EmbeddingError(
                         f"daily embedding quota exhausted for "
-                        f"{settings.gemini_embedding_model}: {exc}"
+                        f"{embedding_model} on every configured key: {exc}"
                     ) from exc
                 if attempt == attempts - 1 or not _is_retryable(exc):
                     raise EmbeddingError(f"embedding call failed: {exc}") from exc

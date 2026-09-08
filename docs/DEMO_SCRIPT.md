@@ -39,13 +39,7 @@ PY
 **3. Pick the upload PDF.** Anything not already ingested. A 5–8 page slice
 finishes in about a minute; a full report will not fit in the shot.
 
-**4. Reset the intro.** The preloader is once per browser session:
-
-```js
-sessionStorage.removeItem('factpulse:preloaded')   // devtools console, then reload
-```
-
-**5. Browser.** 1600×950 or wider so the split view has room. Close devtools.
+**4. Browser.** 1600×950 or wider so the split view has room. Close devtools.
 Hide bookmarks. Zoom at 100%.
 
 **6. Quota.** Every model has a separate daily cap. Confirm the one in `.env`
@@ -61,9 +55,10 @@ print('model OK:', len(extract_facts_from_chunk('Revenue was 5 crore in FY24.', 
 
 ## 0:00 – 0:20 · What this is
 
-**On screen:** load `localhost:3000`. Preloader counts 000 → 100 and wipes.
-Scroll slowly through the explainer — pause about a second on each of Extract,
-Ground, Corroborate & contradict, Reconcile. Keep moving; do not read them out.
+**On screen:** load `localhost:3000`. The hero lands immediately, with a real
+reconciled pair from the corpus beside it. Scroll past the pipeline diagram and
+the four stage cards, then through the live "by the numbers" section. Keep
+moving; do not read them out.
 
 **Say:**
 
@@ -220,7 +215,7 @@ long tail is obvious.
 
 | Time | Screen | IDs |
 | --- | --- | --- |
-| 0:00 | Preloader → explainer scroll | — |
+| 0:00 | Hero → pipeline → stages → live numbers | — |
 | 0:20 | Upload → ingestion theater | any fresh PDF |
 | 0:50 | Fact Explorer → evidence → relationships | fact **99** ↔ **194** |
 | 1:20 | Relationships | fact **12** ↔ **83** |

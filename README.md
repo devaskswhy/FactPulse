@@ -365,10 +365,9 @@ rather than vague about what that means:
   then reported rather than quietly patched. The notable ones: a quote locator
   that matched a short fallback on the wrong page (13 of 56 facts affected); an
   `async def` upload route that blocked the event loop and made the SSE
-  progress stream — the very thing meant to report on it — unresponsive; an
+  progress stream — the very thing meant to report on it — unresponsive; and an
   embedding call with no retry that silently lost a whole document's vectors to
-  a per-minute rate limit; and a preloader that was invisible in development
-  because of a React StrictMode double-invoke.
+  a per-minute rate limit.
 - **It reported negative results.** A parallel page-parsing pass was
   implemented, measured (1 worker 1.60s → 4 workers 3.43s, because PyMuPDF does
   not release the GIL), and removed — with the numbers recorded in the code so

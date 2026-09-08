@@ -58,7 +58,7 @@ class RelatedFact(BaseModel):
 
     relationship_id: int
     relationship_type: str = Field(
-        ..., description="corroborates, contradicts, or reconciled."
+        ..., description="corroborates, contradicts, reconciled, or supersedes."
     )
     rationale: str | None = Field(
         None,
@@ -69,6 +69,16 @@ class RelatedFact(BaseModel):
         ),
     )
     relationship_confidence: float | None = Field(None, ge=0.0, le=1.0)
+    direction: str = Field(
+        "outgoing",
+        description=(
+            "Which end of the stored pair the requested fact sits on: "
+            "'outgoing' if it is fact_id_a, 'incoming' if it is fact_id_b. "
+            "Only meaningful for asymmetric types -- for a supersedes, "
+            "'outgoing' means the requested fact is the current one and "
+            "'incoming' means it is the one that was replaced."
+        ),
+    )
 
     # The fact on the other side.
     fact_id: int

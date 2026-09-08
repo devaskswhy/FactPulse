@@ -79,6 +79,7 @@ All eight steps are implemented.
       render.py        page PNG rendering, caching, and point->pixel scaling
       selfcheck.py     post-ingestion queries for ambiguous or borderline facts
       grounding.py     does the quote SUPPORT the claim, not just exist in it
+      temporal.py      which of two facts describes the later state
       model_pool.py    rotate models when a daily free-tier quota is spent
       progress.py      in-memory phase/progress state for the SSE endpoint
       ingest_log.py    one JSONL line per run, for timing comparisons
@@ -405,6 +406,7 @@ the database — which is the whole reason the review queue exists.
 | `ungrounded_quote` | Quote verified against the chunk but could not be located in the PDF, so it has no bounding box. |
 | `low_confidence` | Model's own confidence is below `REVIEW_CONFIDENCE_THRESHOLD` (default 0.9). |
 | `weak_evidence` | The quote is real but does not support the claim on its own. |
+| `uncertain_supersession` | The classifier's direction and the dates in the two facts pointed opposite ways. The dates won; a human should confirm. |
 | `extraction_failed` | The model call failed for a chunk. Recorded against the chunk, so the gap in coverage is visible. |
 
 Both can apply to one fact, producing two rows.
@@ -466,6 +468,7 @@ that document's new facts against everything already in the layer.
 | `corroborates` | Same underlying claim, independently stated. Wording or precision may differ. |
 | `contradicts` | Genuinely incompatible under the *same* subject, scope, period, unit and basis. |
 | `reconciled` | Looks like a conflict, but a named difference explains it — period, scope, unit, definition, or basis. |
+| `supersedes` | Same property of the same subject at two different times, where a later document records a change. **Directional.** |
 | `unrelated` | Similar enough to be retrieved, but not about the same thing. |
 
 `reconciled` is the category the whole schema exists to serve, and the reason
@@ -476,14 +479,66 @@ rows: the classifier needs them side by side to tell "different period" from
 Unlike `fact_type`, this **is** a closed set, enforced by an `enum` in the
 response schema. The distinction is deliberate. Fact types are a property of
 the corpus and must grow; relationship types are the product's own vocabulary,
-they are what the UI renders, and a model inventing a fifth would silently
-break that rendering. The database column stays free text so the set can grow
+they are what the UI renders, and a model inventing one would silently break
+that rendering. The database column stays free text so the set can grow
 later without a migration — the constraint lives at the point of decision, not
 in the schema.
 
 `unrelated` verdicts are **not** stored. The table answers "what does this fact
 relate to", and most retrieved candidates are unrelated; storing them would
 bury the answer.
+
+### Supersession: when the world changed rather than a source being wrong
+
+A 2023 annual report lists a board of directors. A 2024 filing records that one
+of them resigned. Under a four-way vocabulary the only honest label available
+is `contradicts`, and that tells a reader something false — that one of the two
+documents is wrong. Neither is. Both were true when written.
+
+`supersedes` is the verdict for that, and it is the first one where **direction
+is the content of the claim**. "A supersedes B" and "B supersedes A" are
+opposite statements, so the pair can no longer be stored in whichever order it
+arrived in. The invariant is that for a `supersedes` row, `fact_id_a` is the
+current fact and `fact_id_b` is the one it replaced. `link.py` is the single
+place that establishes it and everything downstream depends on it.
+
+**Two independent signals decide the arrow, and the checkable one wins.** The
+classifier returns a `current_fact` field naming which side is later. That is
+an unverifiable judgement. But the facts themselves usually carry evidence a
+program can read — a `time_scope`, an effective-from date, a year in the
+statement — and `services/temporal.py` parses it. When the two disagree the
+dates win, the rationale is prefixed `[direction corrected]` so the correction
+is visible rather than silent, and the pair is queued as
+`uncertain_supersession` for a human.
+
+The parser exists because one period is written several ways across a single
+corpus: `FY2024`, `2024-25`, `FY2024/25`, `31 March 2024`, `2024-03-31`,
+`Q3 2024`. A fiscal span resolves to its **closing** year, so `FY2024-25` is
+later than `FY2024`, and the two-digit tail is read as a suffix rather than a
+year of its own — otherwise `1999-00` orders before the first century.
+
+**It refuses to rank what it cannot rank.** `FY2024` and `March 2024` are not
+ordered, because one contains the other; nor are `March 2024` and
+`31 March 2024`. Different years settle it whatever else is missing, the same
+year decides nothing unless both sides name a month, and the same month decides
+nothing unless both name a day. A wrong ordering here does not produce a vague
+answer, it produces a confident and inverted one, so every function would
+rather return "cannot tell".
+
+When neither the classifier nor the dates can name a direction, **nothing is
+stored**. This is the one place the pipeline discards a judgement, and it is
+consistent with the rule rather than an exception to it: a supersession without
+an arrow is not a weaker claim, it is a different and unmade one, and defaulting
+to either side would put a confidently backwards statement in front of a user.
+
+On the read side, "has this fact been replaced?" is **derived, not stored**. A
+`still_current` column on `facts` would need rewriting every time a document
+arrived and would be wrong in between; `repo.superseded_by_map()` is one query
+over an indexed column. `GET /facts` carries `superseded_by`, and
+`GET /facts/{id}/relationships` carries `direction` — `outgoing` when the fact
+being asked about is the current one, `incoming` when it is the one replaced.
+The same stored row read from either end is the opposite claim, which is
+exactly what a client needs to know before rendering a label.
 
 ### Retrieval: brute force, deliberately
 

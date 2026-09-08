@@ -49,7 +49,32 @@ const VERDICT: Record<
     bg: "bg-accent/10",
     bar: "bg-accent",
   },
+  // Supersession is the one asymmetric verdict, so it needs two entries. The
+  // same stored row means opposite things depending on which end you read it
+  // from, and a single "SUPERSEDES" label on both would be wrong half the time.
+  supersedes: {
+    label: "SUPERSEDES",
+    ring: "border-supersede/50",
+    text: "text-supersede",
+    bg: "bg-supersede/10",
+    bar: "bg-supersede",
+  },
+  superseded_by: {
+    label: "SUPERSEDED BY",
+    ring: "border-supersede/50",
+    text: "text-supersede",
+    bg: "bg-supersede/10",
+    bar: "bg-supersede",
+  },
 };
+
+/** Which VERDICT entry a relationship reads as from the fact being viewed. */
+function verdictKey(rel: Pick<RelatedFact, "relationship_type" | "direction">) {
+  if (rel.relationship_type === "supersedes" && rel.direction === "incoming") {
+    return "superseded_by";
+  }
+  return rel.relationship_type;
+}
 
 function verdictStyle(kind: string) {
   return (
@@ -61,6 +86,17 @@ function verdictStyle(kind: string) {
       bar: "bg-border",
     }
   );
+}
+
+/**
+ * The backend prefixes a corrected supersession with "[direction corrected]",
+ * which reads as an axis to splitRationale but is not one. "differs by
+ * direction corrected" would be nonsense, so the chip is worded per case.
+ */
+function dimensionLabel(dimension: string) {
+  return dimension === "direction corrected"
+    ? "direction corrected"
+    : `differs by ${dimension}`;
 }
 
 /**
@@ -91,6 +127,7 @@ function EvidenceCard({
   source,
   page,
   accent,
+  stale,
 }: {
   eyebrow: string;
   factType: string;
@@ -103,11 +140,16 @@ function EvidenceCard({
   source: string;
   page: number | null;
   accent?: boolean;
+  stale?: boolean;
 }) {
   return (
     <div
       className={`flex min-w-0 flex-col rounded-lg border bg-surface/50 p-4 ${
-        accent ? "border-accent/40" : "border-border"
+        stale
+          ? "border-supersede/40"
+          : accent
+            ? "border-accent/40"
+            : "border-border"
       }`}
     >
       <div className="flex items-center justify-between gap-2">
@@ -119,7 +161,19 @@ function EvidenceCard({
         </span>
       </div>
 
-      <p className="mt-3 text-sm leading-relaxed text-text">{statement}</p>
+      {stale && (
+        <span className="mt-3 w-fit rounded border border-supersede/40 bg-supersede/10 px-1.5 py-0.5 font-mono text-[10px] text-supersede">
+          no longer current
+        </span>
+      )}
+
+      <p
+        className={`mt-3 text-sm leading-relaxed ${
+          stale ? "text-text-dim line-through decoration-supersede/50" : "text-text"
+        }`}
+      >
+        {statement}
+      </p>
 
       {/* The three axes the verdict actually turns on, always shown together
           so a reader can compare them across the two cards at a glance. */}
@@ -235,7 +289,8 @@ export function ComparisonCard({
   }
 
   const counts = related.reduce<Record<string, number>>((acc, r) => {
-    acc[r.relationship_type] = (acc[r.relationship_type] ?? 0) + 1;
+    const key = verdictKey(r);
+    acc[key] = (acc[key] ?? 0) + 1;
     return acc;
   }, {});
 
@@ -275,8 +330,14 @@ export function ComparisonCard({
       <div ref={listRef} className="mt-5 space-y-6">
         {tab === "cards" &&
           related.map((rel) => {
-            const style = verdictStyle(rel.relationship_type);
+            const kind = verdictKey(rel);
+            const style = verdictStyle(kind);
             const { dimension, body } = splitRationale(rel.rationale);
+            // Whichever card is the replaced one gets struck through. For a
+            // supersedes read from the current fact that is the RELATED card;
+            // read from the replaced fact it is this one.
+            const thisIsStale = kind === "superseded_by";
+            const otherIsStale = kind === "supersedes";
 
             return (
               <article
@@ -297,6 +358,7 @@ export function ComparisonCard({
                     source={sourceTitle || `document ${fact.document_id}`}
                     page={fact.grounding?.page_number ?? null}
                     accent
+                    stale={thisIsStale}
                   />
 
                   {/* Verdict ribbon. Vertical on wide screens so it reads as a
@@ -327,6 +389,7 @@ export function ComparisonCard({
                     quote={rel.grounding?.quote ?? null}
                     source={rel.document_title ?? rel.document_filename}
                     page={rel.grounding?.page_number ?? null}
+                    stale={otherIsStale}
                   />
                 </div>
 
@@ -341,7 +404,7 @@ export function ComparisonCard({
                       <span
                         className={`rounded px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide ${style.bg} ${style.text}`}
                       >
-                        differs by {dimension}
+                        {dimensionLabel(dimension)}
                       </span>
                     )}
                     {rel.relationship_confidence != null && (
@@ -408,12 +471,15 @@ function NetworkView({
           const angle = (i / related.length) * Math.PI * 2 - Math.PI / 2;
           const x = centre + Math.cos(angle) * radius;
           const y = centre + Math.sin(angle) * radius;
+          const kind = verdictKey(rel);
           const stroke =
-            rel.relationship_type === "corroborates"
+            kind === "corroborates"
               ? "var(--corroborate)"
-              : rel.relationship_type === "contradicts"
+              : kind === "contradicts"
                 ? "var(--contradict)"
-                : "var(--accent)";
+                : kind.startsWith("supersede")
+                  ? "var(--supersede)"
+                  : "var(--accent)";
           return (
             <g key={rel.relationship_id}>
               <line
@@ -436,7 +502,7 @@ function NetworkView({
                 onClick={() => onOpenFact?.(rel.fact_id)}
               />
               <title>
-                {rel.relationship_type}: {rel.statement}
+                {verdictStyle(kind).label.toLowerCase()}: {rel.statement}
               </title>
             </g>
           );

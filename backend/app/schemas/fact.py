@@ -86,6 +86,14 @@ class Fact(FactBase):
         default_factory=list,
         description="What the quote leaves out, in plain language.",
     )
+    superseded_by: int | None = Field(
+        None,
+        description=(
+            "The id of a later fact that replaced this one, or null if this "
+            "fact is still current. Derived from the relationships table on "
+            "read, so it is never stale."
+        ),
+    )
 
     model_config = {"from_attributes": True}
 

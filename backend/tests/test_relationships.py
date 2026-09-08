@@ -26,7 +26,14 @@ import pytest
 
 from app.core.config import settings
 from app.services.extract import ExtractionError, QuotaExhaustedError, build_client
-from app.services.link import CORROBORATES, CONTRADICTS, classify_candidates
+from app.services.link import (
+    CONTRADICTS,
+    CORROBORATES,
+    CURRENT_A,
+    SUPERSEDES,
+    classify_candidates,
+    resolve_direction,
+)
 
 pytestmark = pytest.mark.skipif(
     not settings.gemini_configured,
@@ -158,3 +165,65 @@ def test_classifier_returns_one_verdict_per_candidate():
     )
     assert verdicts[0]["relationship_type"] == CORROBORATES
     assert verdicts[1]["relationship_type"] == CONTRADICTS
+
+
+# The assignment brief's own example of the case a four-way vocabulary gets
+# wrong: a board listing and a later resignation are not a contradiction.
+BOARD_2023 = as_row(
+    statement=(
+        "The board of directors of Acme Corp comprised Priya Raman, "
+        "Tomas Lind and Wei Chen as at 31 March 2023."
+    ),
+    subject="Acme Corp board of directors",
+    time_scope="31 March 2023",
+    quote="the board comprised Priya Raman, Tomas Lind and Wei Chen",
+    document_title="Acme Annual Report FY2023",
+    document_filename="acme-annual-2023.pdf",
+)
+RESIGNATION_2024 = as_row(
+    statement=(
+        "Wei Chen resigned from the board of directors of Acme Corp with "
+        "effect from 12 March 2024."
+    ),
+    subject="Acme Corp board of directors",
+    time_scope="12 March 2024",
+    quote="Wei Chen resigned from the board with effect from 12 March 2024",
+    document_title="Acme Regulatory Filing 2024",
+    document_filename="acme-filing-2024.pdf",
+)
+
+
+def test_a_later_change_supersedes_rather_than_contradicts():
+    """The brief's resigned-director case.
+
+    Both facts were true when written. Calling this a contradiction would tell
+    a reader one of the two documents is wrong, which is the wrong thing to
+    tell them -- the world changed.
+    """
+    verdicts = classify_or_skip(RESIGNATION_2024, [BOARD_2023])
+
+    assert 0 in verdicts
+    verdict = verdicts[0]
+    assert verdict["relationship_type"] == SUPERSEDES, (
+        f"a later resignation replaces an earlier board listing; got "
+        f"{verdict['relationship_type']!r} -- {verdict['rationale']}"
+    )
+    assert verdict["rationale"]
+
+
+def test_the_supersession_arrow_points_at_the_later_fact():
+    """Direction is the whole content of a supersession.
+
+    Whatever the classifier says, the dates in the two facts have to agree that
+    the resignation is the current state -- otherwise the UI would strike
+    through the wrong one.
+    """
+    verdicts = classify_or_skip(RESIGNATION_2024, [BOARD_2023])
+    direction = resolve_direction(
+        RESIGNATION_2024, BOARD_2023, verdicts[0].get("current_fact")
+    )
+
+    assert direction is not None, "the dates alone can settle this pair"
+    assert direction.current == CURRENT_A, (
+        "the 2024 resignation is the current fact, not the 2023 board listing"
+    )

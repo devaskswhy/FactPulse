@@ -67,6 +67,18 @@ def list_facts(
     }
     facts = repo.list_facts(conn, limit=limit, offset=offset, **filters)
 
+    # "Has this been replaced?" is derived from the relationships table rather
+    # than stored on the fact, so it cannot go stale. One query for the whole
+    # page, not one per row.
+    superseded = repo.superseded_by_map(conn)
+    if superseded:
+        facts = [
+            f.model_copy(update={"superseded_by": superseded[f.id]})
+            if f.id in superseded
+            else f
+            for f in facts
+        ]
+
     # Resolve each represented document once, so a cross-document list can name
     # every fact's source without a query per row.
     titles: dict[str, str] = {}
@@ -94,6 +106,9 @@ def get_fact(
     fact = repo.get_fact(conn, fact_id)
     if fact is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no fact {fact_id}")
+    replacement = repo.superseded_by_map(conn).get(fact_id)
+    if replacement is not None:
+        fact = fact.model_copy(update={"superseded_by": replacement})
     return fact
 
 
@@ -143,8 +158,14 @@ def get_review_queue(
     )
 
 
-def _row_to_related(row) -> RelatedFact:
-    """Map one joined relationship+fact+document row onto the response model."""
+def _row_to_related(row, fact_id: int) -> RelatedFact:
+    """Map one joined relationship+fact+document row onto the response model.
+
+    `fact_id` is the fact being asked about. It is needed only to work out
+    which end of the stored pair that fact sits on, which matters for the one
+    asymmetric relationship type: a supersedes read from the current fact and
+    the same row read from the replaced fact are opposite claims.
+    """
     bbox = None
     if row["bbox_x0"] is not None:
         bbox = BBox(
@@ -160,6 +181,7 @@ def _row_to_related(row) -> RelatedFact:
         relationship_type=row["relationship_type"],
         rationale=row["rationale"],
         relationship_confidence=row["relationship_confidence"],
+        direction="outgoing" if row["fact_id_a"] == fact_id else "incoming",
         fact_id=row["id"],
         fact_type=row["fact_type"],
         subject=row["subject"],
@@ -183,22 +205,27 @@ def _row_to_related(row) -> RelatedFact:
 def get_fact_relationships(
     fact_id: int,
     relationship_type: str | None = Query(
-        None, description="Filter to one type: corroborates, contradicts, reconciled."
+        None,
+        description=(
+            "Filter to one type: corroborates, contradicts, reconciled, "
+            "supersedes."
+        ),
     ),
     conn: sqlite3.Connection = Depends(db_dependency),
 ) -> RelationshipList:
-    """Every corroborating, contradicting or reconciled counterpart of a fact.
+    """Every corroborating, contradicting, reconciled or superseding counterpart.
 
     Each entry carries the related fact in full plus its source document, page
     and quote, so a comparison view can be rendered without a follow-up request
-    per relationship. Direction is not significant: a relationship stored as
-    (a, b) is returned when asking about either end.
+    per relationship. A relationship stored as (a, b) is returned when asking
+    about either end; `direction` says which end this fact is, which is what
+    distinguishes "supersedes" from "was superseded by".
     """
     if repo.get_fact(conn, fact_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no fact {fact_id}")
 
     rows = repo.list_related_facts(conn, fact_id)
-    related = [_row_to_related(r) for r in rows]
+    related = [_row_to_related(r, fact_id) for r in rows]
     if relationship_type:
         related = [r for r in related if r.relationship_type == relationship_type]
     return RelationshipList(fact_id=fact_id, total=len(related), relationships=related)

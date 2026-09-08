@@ -29,7 +29,7 @@ from google.genai import types
 
 from app.core.config import settings
 from app.db import repository as repo
-from app.services import model_pool
+from app.services import model_pool, temporal
 from app.services.embed import (
     EmbeddingError,
     cosine_against_matrix,
@@ -37,6 +37,7 @@ from app.services.embed import (
     pack_vector,
     unpack_vector,
 )
+from app.services.pipeline import ISSUE_UNCERTAIN_SUPERSESSION
 from app.services.progress import ProgressTracker
 from app.services.extract import (
     ExtractionError,
@@ -59,17 +60,28 @@ SIMILARITY_THRESHOLD = 0.75
 TOP_K = 8
 
 # Relationship labels the classifier chooses between. Unlike fact_type, this IS
-# a closed set: the four categories are the product's own vocabulary, they are
-# what the UI renders, and a model inventing a fifth would silently break that
+# a closed set: the categories are the product's own vocabulary, they are what
+# the UI renders, and a model inventing another would silently break that
 # rendering. The database column stays free text so the set can grow later
 # without a migration -- the constraint lives here, at the point of decision,
 # not in the schema.
 CORROBORATES = "corroborates"
 CONTRADICTS = "contradicts"
 RECONCILED = "reconciled"
+SUPERSEDES = "supersedes"
 UNRELATED = "unrelated"
 
-RELATIONSHIP_TYPES = (CORROBORATES, CONTRADICTS, RECONCILED, UNRELATED)
+RELATIONSHIP_TYPES = (CORROBORATES, CONTRADICTS, RECONCILED, SUPERSEDES, UNRELATED)
+
+# Which side of a supersession the classifier can name.
+CURRENT_A = "a"
+CURRENT_CANDIDATE = "candidate"
+CURRENT_SIDES = (CURRENT_A, CURRENT_CANDIDATE)
+
+# SUPERSEDES is the only asymmetric verdict, so it carries a storage invariant
+# the other four do not need: `fact_id_a` is always the CURRENT fact and
+# `fact_id_b` the one it replaced. Everything that reads the table can rely on
+# that, and _resolve_direction below is the single place that establishes it.
 
 
 @dataclass
@@ -273,6 +285,17 @@ def _classification_schema() -> types.Schema:
                                 "definition, or basis. Null otherwise."
                             ),
                         ),
+                        "current_fact": types.Schema(
+                            type=types.Type.STRING,
+                            nullable=True,
+                            enum=list(CURRENT_SIDES),
+                            description=(
+                                "For 'supersedes' only: which of the two "
+                                "describes the LATER state -- 'a' for Fact A, "
+                                "'candidate' for this candidate. Null "
+                                "otherwise."
+                            ),
+                        ),
                         "confidence": types.Schema(
                             type=types.Type.NUMBER,
                             description="Confidence in this judgement, 0 to 1.",
@@ -310,10 +333,34 @@ For each candidate choose exactly one:
                  country vs a region), a different unit, or a different
                  definition or accounting basis. You must name that difference.
 
+  supersedes   - Both facts describe the same property of the same subject, and
+                 one records a CHANGE that replaces the other. The earlier fact
+                 was true when it was written and has since stopped being true.
+                 A 2023 annual report listing a board of directors and a 2024
+                 filing recording that one of those directors resigned do not
+                 contradict each other: the later fact supersedes the earlier
+                 one. Use this only when the two facts give explicit evidence of
+                 which state came later -- a date, a period, an effective-from.
+                 Without that evidence it is 'contradicts' or 'reconciled'.
+
   unrelated    - They are about different things, or share only a topic. Two
                  facts both mentioning revenue are not related unless they are
                  about the same revenue. Most candidates will be unrelated;
                  say so rather than forcing a connection.
+
+'supersedes' is the only verdict where direction matters, so it needs one extra
+field. Set current_fact to whichever side describes the LATER state: "a" if
+Fact A does, "candidate" if the candidate does. Fact A is not necessarily the
+newer of the two -- documents are not processed in date order, so decide from
+the periods and dates in the facts themselves, never from which one is
+presented first. Leave current_fact null for every other verdict.
+
+The distinction between 'supersedes' and 'contradicts' is whether the world
+changed or a source is wrong. "Revenue was 4.2m in FY2023" and "revenue was
+5.1m in FY2024" is neither -- that is two different measurements, so
+'unrelated' or 'reconciled'. Supersession is for a claim about a CURRENT state
+that a later document revises: a board composition, a headquarters, a credit
+rating, a policy, a holding.
 
 The rationale is shown to a human as the explanation for the verdict, so it
 must be concrete and checkable. Quote or name the actual values, periods, units
@@ -327,7 +374,8 @@ and words from BOTH facts that drove your decision.
                    do not conflict."
 
 Be conservative about 'contradicts'. If a difference in period, scope, unit or
-basis could explain the gap, it is 'reconciled', not a contradiction. If the
+basis could explain the gap, it is 'reconciled', not a contradiction. If a
+later document records that the situation changed, it is 'supersedes'. If the
 two facts are simply about different things, it is 'unrelated'.
 
 Return exactly one verdict per candidate, using the candidate's given index.
@@ -469,14 +517,74 @@ def classify_candidates(
         except (TypeError, ValueError):
             confidence = 0.0
 
+        # Only meaningful for SUPERSEDES, and normalised here rather than at
+        # the call site so an unexpected value becomes None once, in one place.
+        current = str(item.get("current_fact") or "").strip().lower()
+
         results[position] = {
             "relationship_type": kind,
             "rationale": str(item.get("rationale") or "").strip(),
             "reconciling_dimension": item.get("reconciling_dimension"),
+            "current_fact": current if current in CURRENT_SIDES else None,
             "confidence": confidence,
         }
 
     return results
+
+
+# ------------------------------------------------------------------ direction
+
+
+@dataclass
+class Direction:
+    """Which end of a supersession is the current fact, and how sure we are."""
+
+    current: str  # CURRENT_A or CURRENT_CANDIDATE
+    disputed: bool = False  # the classifier read the arrow the other way
+    evidence: str = ""  # the dates that settled it, for the rationale
+
+
+def resolve_direction(
+    row_a: sqlite3.Row, row_b: sqlite3.Row, claimed: str | None
+) -> Direction | None:
+    """Settle which of two facts describes the later state.
+
+    The classifier proposes a direction; the dates in the facts get the final
+    say. That ordering is deliberate. A verdict is an unverifiable judgement,
+    but "FY2023 is before FY2024" is checkable evidence sitting in the data,
+    and when the two disagree the checkable one should win.
+
+    The dates only speak when they can. `temporal.order` returns 0 for periods
+    it cannot rank -- FY2024 against March 2024, or two facts naming no period
+    at all -- and in that case the classifier's answer stands unchallenged.
+
+    Returns None when neither source can name a direction. That is the one case
+    where nothing is stored: a supersession without a direction is not a weaker
+    claim, it is a different and unmade one, and guessing the arrow would put a
+    confidently backwards statement in front of a user.
+    """
+    measured = temporal.order(
+        scope_a=row_a["time_scope"],
+        statement_a=row_a["statement"],
+        scope_b=row_b["time_scope"],
+        statement_b=row_b["statement"],
+    )
+    if measured == 0:
+        return Direction(claimed) if claimed else None
+
+    local = CURRENT_A if measured > 0 else CURRENT_CANDIDATE
+    if claimed is None or claimed == local:
+        return Direction(local)
+
+    later, earlier = (row_a, row_b) if measured > 0 else (row_b, row_a)
+    return Direction(
+        local,
+        disputed=True,
+        evidence=(
+            f"{_fmt(later['time_scope'] or later['statement'])} is after "
+            f"{_fmt(earlier['time_scope'] or earlier['statement'])}"
+        ),
+    )
 
 
 # ------------------------------------------------------------------- the step
@@ -607,19 +715,60 @@ def link_document_facts(
             if kind == RECONCILED and dimension:
                 rationale = f"[{dimension}] {rationale}"
 
+            # Every other verdict is symmetric, so the pair goes in as it came.
+            # SUPERSEDES has to be oriented: fact_id_a is the current fact.
+            id_a, id_b = fact.id, other_id
+            direction: Direction | None = None
+            if kind == SUPERSEDES:
+                direction = resolve_direction(
+                    row_a, candidate_rows[position], verdict.get("current_fact")
+                )
+                if direction is None:
+                    # Neither the classifier nor the dates could say which fact
+                    # replaced which. Storing it either way round would be an
+                    # invention, so this counts as a failed judgement.
+                    logger.warning(
+                        "supersedes with no resolvable direction: %s vs %s",
+                        fact.id, other_id,
+                    )
+                    summary.errors += 1
+                    continue
+                if direction.current == CURRENT_CANDIDATE:
+                    id_a, id_b = other_id, fact.id
+                if direction.disputed:
+                    rationale = (
+                        f"[direction corrected] The classifier named the other "
+                        f"fact as the current one, but {direction.evidence}, so "
+                        f"the arrow is stored the other way. {rationale}"
+                    )
+
             created = repo.insert_relationship(
                 conn,
-                fact_id_a=fact.id,
-                fact_id_b=other_id,
+                fact_id_a=id_a,
+                fact_id_b=id_b,
                 relationship_type=kind,
                 rationale=rationale,
                 confidence=float(verdict["confidence"]),
             )
             if created is not None:
                 summary.relationships_created += 1
+                if direction is not None and direction.disputed:
+                    # Two signals disagreed and one was overruled. The dates are
+                    # the better evidence, but a human should still see it.
+                    repo.insert_review_item(
+                        conn,
+                        fact_id=id_a,
+                        chunk_id=None,
+                        issue_type=ISSUE_UNCERTAIN_SUPERSESSION,
+                        note=(
+                            f"Fact {id_a} is stored as superseding fact {id_b} "
+                            f"on the dates ({direction.evidence}), but the "
+                            f"classifier read the supersession the other way."
+                        ),
+                    )
             logger.info(
                 "fact %s -> %s : %s (cosine %.3f)",
-                fact.id, other_id, kind, candidate_scores[position],
+                id_a, id_b, kind, candidate_scores[position],
             )
 
     return summary

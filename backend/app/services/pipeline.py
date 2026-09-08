@@ -47,6 +47,12 @@ ISSUE_EXTRACTION_FAILED = "extraction_failed"
 ISSUE_QUOTA_EXHAUSTED = "quota_exhausted"
 ISSUE_WEAK_EVIDENCE = "weak_evidence"
 
+# Written by the linking step, not this module: a supersession where the
+# classifier's direction and the dates in the two facts pointed opposite ways.
+# The dates win, because they are checkable, but the disagreement is exactly
+# the kind of thing a human should adjudicate.
+ISSUE_UNCERTAIN_SUPERSESSION = "uncertain_supersession"
+
 
 @dataclass
 class ExtractionSummary:

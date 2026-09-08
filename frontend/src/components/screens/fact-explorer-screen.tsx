@@ -304,6 +304,18 @@ export function FactExplorerScreen({
                                 {EVIDENCE_TIER[fact.evidence_strength]?.label}
                               </span>
                             )}
+                          {/* A fact a later document has replaced. Kept in
+                              the list rather than filtered out -- it was true
+                              when it was written, and hiding it would lose the
+                              history the supersession records. */}
+                          {fact.superseded_by != null && (
+                            <span
+                              className="rounded border border-supersede/40 bg-supersede/10 px-1.5 py-0.5 text-[10px] text-supersede"
+                              title={`Replaced by fact ${fact.superseded_by}.`}
+                            >
+                              superseded
+                            </span>
+                          )}
                           {fact.subject && <span className="truncate">{fact.subject}</span>}
                           {fact.normalized_value && (
                             <span>

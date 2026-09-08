@@ -604,6 +604,27 @@ def list_related_facts(conn: sqlite3.Connection, fact_id: int) -> list[sqlite3.R
     ).fetchall()
 
 
+def superseded_by_map(conn: sqlite3.Connection) -> dict[int, int]:
+    """{superseded fact id -> the fact that replaced it}.
+
+    Derived, never stored on the fact. A "still current?" flag on `facts` would
+    have to be rewritten every time a new document arrives and would be wrong
+    in between; the relationships table already holds the answer, and this is
+    one small query over an indexed column.
+
+    Relies on the SUPERSEDES orientation invariant that link.py establishes:
+    fact_id_a is the current fact, fact_id_b the one it replaced. Direction is
+    load-bearing here in a way it is not for any other relationship type.
+    """
+    rows = conn.execute(
+        "SELECT fact_id_a, fact_id_b FROM relationships "
+        "WHERE relationship_type = 'supersedes' ORDER BY id"
+    ).fetchall()
+    # Later rows win: if a fact is superseded twice, the most recently recorded
+    # replacement is the one to point a reader at.
+    return {row["fact_id_b"]: row["fact_id_a"] for row in rows}
+
+
 def get_fact_context(conn: sqlite3.Connection, fact_id: int) -> sqlite3.Row | None:
     """A fact joined with its document title, for building the classifier prompt."""
     return conn.execute(

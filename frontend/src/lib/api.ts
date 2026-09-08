@@ -167,6 +167,8 @@ export type Fact = {
    */
   evidence_strength: "full" | "partial" | "insufficient" | null;
   evidence_gaps: string[];
+  /** Id of a later fact that replaced this one, or null if still current. */
+  superseded_by: number | null;
 };
 
 /** Badge styling for an evidence tier. */
@@ -234,6 +236,13 @@ export type RelatedFact = {
   relationship_type: string;
   rationale: string | null;
   relationship_confidence: number | null;
+  /**
+   * Which end of the stored pair the fact being viewed sits on. Only
+   * meaningful for `supersedes`, where "outgoing" means this fact is the
+   * current one and "incoming" means it is the one that was replaced -- the
+   * same row read from either end is the opposite claim.
+   */
+  direction: "outgoing" | "incoming";
   fact_id: number;
   fact_type: string;
   subject: string | null;

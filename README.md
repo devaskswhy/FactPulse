@@ -2,8 +2,9 @@
 
 A **fact knowledge layer**. FactPulse extracts facts from PDFs, grounds each
 one in the exact source span it came from, and detects whether facts across
-documents **corroborate**, **contradict**, or can be **reconciled** through
-context — time period, scope, or units.
+documents **corroborate**, **contradict**, can be **reconciled** through
+context — time period, scope, or units — or **supersede** one another when a
+later document records that the situation changed.
 
 > Two documents say revenue was $4.2M and $5.1M. The useful answer is rarely
 > "contradiction" — it is usually "different fiscal period" or "one is a
@@ -97,11 +98,12 @@ cd backend
 pytest
 ```
 
-28 tests. Most cover ingestion, quote grounding, evidence sufficiency, the
-review queue and model rotation with the model stubbed, so they are
-deterministic and need no API key. Three exercise the live relationship
-classifier on synthetic inputs; they **skip cleanly** when no key is configured
-or every model's daily free-tier quota is spent.
+59 tests. Most cover ingestion, quote grounding, evidence sufficiency,
+temporal ordering, supersession direction, the review queue and model rotation
+with the model stubbed, so they are deterministic and need no API key. Five
+exercise the live relationship classifier on synthetic inputs — including the
+brief's own resigned-director case — and they **skip cleanly** when no key is
+configured or every model's daily free-tier quota is spent.
 
 ---
 
@@ -171,6 +173,44 @@ Crucially, the three axes that must be **machine-comparable** —
 the linking step filters and groups on them constantly. The open parts are the
 parts only humans and models read. Adding a new kind of fact costs one
 `INSERT`, not one migration.
+
+### A contradiction and a change are not the same thing
+
+A 2023 annual report lists a board of directors. A 2024 filing records that one
+of them resigned. With only corroborates / contradicts / reconciled to choose
+from, the closest label is `contradicts` — which tells a reader that one of the
+two documents is wrong. Neither is. Both were true when written.
+
+`supersedes` is the fifth verdict, and the only one where **direction is the
+claim**. "A supersedes B" and "B supersedes A" are opposite statements, so the
+arrow has to be right.
+
+Two signals decide it, and the checkable one wins. The classifier names which
+side is later; that is a judgement. The facts themselves usually carry a
+`time_scope` or a date in the statement; that is evidence, and
+`services/temporal.py` reads it. When they disagree, the dates win, the
+rationale is prefixed `[direction corrected]` so the correction is visible, and
+the pair is queued for a human as `uncertain_supersession`.
+
+The parser handles the several ways one period is written across a single
+corpus — `FY2024`, `2024-25`, `31 March 2024`, `2024-03-31`, `Q3 2024` — and,
+more importantly, refuses to rank what it cannot rank. `FY2024` and
+`March 2024` are not ordered, because one contains the other. When neither the
+classifier nor the dates can name a direction, nothing is stored: a
+supersession without an arrow is not a weaker claim, it is a different and
+unmade one, and guessing would put a confidently backwards statement in front
+of a user.
+
+Superseded facts are **kept and marked**, not filtered out — they were true
+once, and that history is the point. The fact list shows a `superseded` badge
+and the comparison view strikes through whichever card is no longer current.
+
+> The committed corpus contains no supersessions, and that is the correct
+> answer for it: macroeconomic and ESG reports disagree about *measurements*,
+> which is contradiction or reconciliation, not change. Supersession needs
+> documents that restate a **current state** — a board, a registered office, a
+> credit rating — across two dates. The behaviour is covered by tests against
+> the live model in `tests/test_relationships.py`.
 
 ### Grounding is not the same as sufficiency
 

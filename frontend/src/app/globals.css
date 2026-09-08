@@ -31,6 +31,10 @@
   /* Verdict ribbons ONLY. Not success/error. */
   --corroborate: #3fb27f;
   --contradict: #e5484d;
+  /* Supersession is neither agreement nor conflict -- it is the passage of
+     time -- so it gets its own cool hue rather than borrowing the amber
+     accent, which already means "look here". */
+  --supersede: #6e8bd6;
 
   /* Motion. Mirrors src/lib/motion.ts -- see the note there. */
   --duration-fast: 0.3s;
@@ -54,6 +58,7 @@
   --color-accent: var(--accent);
   --color-corroborate: var(--corroborate);
   --color-contradict: var(--contradict);
+  --color-supersede: var(--supersede);
 
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);

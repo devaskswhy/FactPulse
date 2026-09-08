@@ -54,11 +54,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
-        run: npx tsc --noEmit
-
       - name: Lint
         run: npx eslint src --max-warnings 0
 
+      # Build BEFORE typecheck, not after. Next.js generates route-typing
+      # globals (e.g. LayoutProps) into .next/types as a side effect of
+      # build/dev; a fresh checkout has no .next directory yet, so running
+      # `tsc --noEmit` first fails on those names with no such build ever
+      # having happened. `next build` runs its own TypeScript check
+      # internally, so this ordering is also strictly more correct, not just
+      # a workaround -- the explicit tsc step after it is a fast, separately
+      # labelled confirmation, not the first line of defense.
       - name: Build
         run: npm run build
+
+      - name: Typecheck
+        run: npx tsc --noEmit

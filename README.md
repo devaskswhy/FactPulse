@@ -125,6 +125,40 @@ camera.
 
 ---
 
+## The four required cases
+
+Every one is reproducible in the running app against the committed corpus, with
+exact fact and relationship ids in
+[docs/DEMO_CASES.md](docs/DEMO_CASES.md). None is hardcoded anywhere in the
+pipeline — no document name, fact id, or figure appears in the extraction or
+relationship code.
+
+| # | Case | Where |
+| --- | --- | --- |
+| 1 | **Corroborated across documents, expressed differently** — RBI and the IMF both report FY2024-25 headline inflation at 4.6%, in wording sharing almost no phrasing | Relationship 19, facts 99 + 194 |
+| 2 | **Genuine contradiction** — RBI says global growth was 3.5% in 2023; the Economic Survey says 3.3%. Same metric, same period, different WEO vintages, and neither document says so | Relationship 14, facts 83 + 12 |
+| 3 | **Apparent contradiction explained by context** — 3.3% *actual* vs 3.2% *IMF projection* for the same year. Reconciled by definition, not by period | Relationship 10, facts 78 + 13 |
+| 4 | **Extraction failure and how it was handled** — a waste-intensity figure of 23.3 extracted correctly with **no unit**, because the table never states one. Caught by the post-ingestion self-check, kept and queued rather than dropped | [docs/FAILURE_CASE.md](docs/FAILURE_CASE.md), fact 295 |
+
+The first three show the source evidence (page image with the quote boxed) and
+the system's own rationale citing both sides.
+
+## Brownie points
+
+All four suggested extensions are implemented, plus three of our own.
+
+| Extension | How | Detail |
+| --- | --- | --- |
+| **Large PDFs without performance issues** | Bounded concurrency, streamed progress, page-image caching. Measured 3.08× on a 10-chunk burst; honest about free-tier throughput pacing beyond that | [ARCHITECTURE §9](docs/ARCHITECTURE.md) |
+| **Many PDFs in one knowledge layer** | Every relationship in the corpus is cross-document. The candidate pool is loaded once per ingest as a matrix, not once per fact | [ARCHITECTURE §6](docs/ARCHITECTURE.md) |
+| **A schema that evolves dynamically** | `fact_type` is free text with an EAV sidecar — 179 types discovered, none predefined, and the registry makes the growth visible | [ARCHITECTURE §4](docs/ARCHITECTURE.md) |
+| **New documents incrementally** | A new document is embedded and compared against the existing layer; nothing already stored is re-extracted, re-embedded or re-judged | [ARCHITECTURE §8](docs/ARCHITECTURE.md) |
+| *Evidence sufficiency* | A verified quote is not a sufficient one. Every fact is graded full / partial / insufficient — 129/103/103 on this corpus | [ARCHITECTURE §5](docs/ARCHITECTURE.md) |
+| *A fifth verdict: supersedes* | A resigned director is not a contradiction, it is a change. Directional, with the dates overruling the classifier when they disagree | [ARCHITECTURE §6](docs/ARCHITECTURE.md) |
+| *Canonical subject resolution* | "Delhivery" and "Delhivery Limited" resolve to one entity — mechanical folding only, never a semantic guess | [ARCHITECTURE §4](docs/ARCHITECTURE.md) |
+
+---
+
 ## Approach
 
 ### The fact knowledge layer

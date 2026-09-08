@@ -83,6 +83,13 @@ class KnowledgeLayerTotals(BaseModel):
         ..., ge=0, description="Relationships whose two facts come from different documents."
     )
     open_review_items: int = Field(..., ge=0)
+    relationships_by_type: dict[str, int] = Field(
+        default_factory=dict,
+        description="corroborates / contradicts / reconciled / supersedes counts.",
+    )
+    evidence_by_strength: dict[str, int] = Field(
+        default_factory=dict, description="full / partial / insufficient counts."
+    )
 
 
 class DocumentList(BaseModel):

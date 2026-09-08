@@ -924,9 +924,14 @@ def list_documents_with_counts(
     ).fetchall()
 
 
-def knowledge_layer_totals(conn: sqlite3.Connection) -> dict[str, int]:
-    """Corpus-wide counts for the workspace header."""
+def knowledge_layer_totals(conn: sqlite3.Connection) -> dict[str, object]:
+    """Corpus-wide counts for the workspace header, and for the landing page's
+    "by the numbers" section -- both read this one function, so a number shown
+    to a visitor before they have even logged anything can never disagree with
+    the one shown inside the app once they have.
+    """
     one = lambda sql: conn.execute(sql).fetchone()[0]
+    by_group = lambda sql: {row[0]: row[1] for row in conn.execute(sql)}
     return {
         "documents": one("SELECT COUNT(*) FROM documents"),
         "facts": one("SELECT COUNT(*) FROM facts"),
@@ -940,6 +945,13 @@ def knowledge_layer_totals(conn: sqlite3.Connection) -> dict[str, int]:
             "WHERE a.document_id != b.document_id"
         ),
         "open_review_items": one("SELECT COUNT(*) FROM review_queue WHERE resolved = 0"),
+        "relationships_by_type": by_group(
+            "SELECT relationship_type, COUNT(*) FROM relationships GROUP BY relationship_type"
+        ),
+        "evidence_by_strength": by_group(
+            "SELECT evidence_strength, COUNT(*) FROM facts "
+            "WHERE evidence_strength IS NOT NULL GROUP BY evidence_strength"
+        ),
     }
 
 

@@ -31,6 +31,10 @@ export type KnowledgeLayerTotals = {
   relationships: number;
   cross_document_relationships: number;
   open_review_items: number;
+  /** corroborates / contradicts / reconciled / supersedes -> count. */
+  relationships_by_type: Record<string, number>;
+  /** full / partial / insufficient -> count. */
+  evidence_by_strength: Record<string, number>;
 };
 
 export type DocumentList = {

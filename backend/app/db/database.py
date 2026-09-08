@@ -65,6 +65,7 @@ _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "facts": [
         ("evidence_strength", "TEXT"),
         ("evidence_gaps", "TEXT"),
+        ("canonical_subject", "TEXT"),
     ],
 }
 

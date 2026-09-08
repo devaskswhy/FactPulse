@@ -373,3 +373,24 @@ def assess_evidence(
     before the check was added.
     """
     return assess_evidence_backfill(conn, document_id)
+
+
+@router.post(
+    "/resolve-subjects",
+    summary="Recompute the canonical-subject matching key for existing facts",
+)
+def resolve_subjects(
+    document_id: int | None = Query(
+        None, description="Restrict to one document. Omit for the whole layer."
+    ),
+    conn: sqlite3.Connection = Depends(db_dependency),
+) -> dict[str, int]:
+    """Backfill `canonical_subject`.
+
+    Uses no model calls: canonicalize_subject is a pure function of `subject`,
+    so this can be re-run over an existing corpus for free -- after the column
+    was added, or after the canonicalizer's rules changed. New facts get it at
+    ingestion time; this exists for facts written before either of those.
+    """
+    updated = repo.backfill_canonical_subjects(conn, document_id)
+    return {"updated": updated}

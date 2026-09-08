@@ -18,7 +18,7 @@ import { ComparisonCard } from "@/components/comparison-card";
 import { EvidenceViewer } from "@/components/evidence-viewer";
 import { TaxonomyPanel } from "@/components/taxonomy-panel";
 
-type GroupMode = "none" | "document" | "type";
+type GroupMode = "none" | "document" | "type" | "subject";
 
 export function FactExplorerScreen({
   documentId,
@@ -119,7 +119,33 @@ export function FactExplorerScreen({
   }, [data, search]);
 
   const groups = useMemo(() => {
-    if (group === "none") return [{ key: "", label: "", facts: visible }];
+    if (group === "none") return [{ key: "", label: "", variants: 0, facts: visible }];
+
+    if (group === "subject") {
+      // Grouped on canonical_subject so "Acme Corp" and "Acme Corporation"
+      // land in one bucket, but the raw `subject` strings are still counted
+      // per bucket -- that count is what proves two spellings actually
+      // merged, rather than a filter silently missing one of them.
+      const map = new Map<string, Fact[]>();
+      for (const fact of visible) {
+        const key = fact.canonical_subject ?? fact.subject ?? "(no subject)";
+        const bucket = map.get(key);
+        if (bucket) bucket.push(fact);
+        else map.set(key, [fact]);
+      }
+      return [...map.entries()]
+        .sort((a, b) => b[1].length - a[1].length)
+        .map(([key, facts]) => {
+          const counts = new Map<string, number>();
+          for (const fact of facts) {
+            const raw = fact.subject ?? "(no subject)";
+            counts.set(raw, (counts.get(raw) ?? 0) + 1);
+          }
+          const byCount = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+          return { key, label: byCount[0][0], variants: byCount.length, facts };
+        });
+    }
+
     const map = new Map<string, Fact[]>();
     for (const fact of visible) {
       const key =
@@ -132,7 +158,7 @@ export function FactExplorerScreen({
     }
     return [...map.entries()]
       .sort((a, b) => b[1].length - a[1].length)
-      .map(([key, facts]) => ({ key, label: key, facts }));
+      .map(([key, facts]) => ({ key, label: key, variants: 0, facts }));
   }, [visible, group, data]);
 
   // Stagger on load and on every filter change, capped so a 300-fact list does
@@ -180,7 +206,7 @@ export function FactExplorerScreen({
             />
             <div className="flex items-center gap-1 font-mono text-[11px]">
               <span className="text-text-dim">group</span>
-              {(["document", "type", "none"] as const).map((mode) => (
+              {(["document", "type", "subject", "none"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
@@ -254,6 +280,16 @@ export function FactExplorerScreen({
                 <h3 className="sticky top-0 z-10 border-b border-border bg-bg/95 px-5 py-2 font-mono text-[11px] uppercase tracking-[0.2em] text-text-dim backdrop-blur">
                   {bucket.label}
                   <span className="ml-2 opacity-60">{bucket.facts.length}</span>
+                  {/* Proof the fold did something: this entity was written
+                      more than one way and the group still landed as one. */}
+                  {bucket.variants > 1 && (
+                    <span
+                      className="ml-2 rounded border border-accent/40 px-1.5 py-0.5 text-[10px] normal-case tracking-normal text-accent"
+                      title="Raw subject spellings merged into this group"
+                    >
+                      {bucket.variants} spellings merged
+                    </span>
+                  )}
                 </h3>
               )}
               <ul>

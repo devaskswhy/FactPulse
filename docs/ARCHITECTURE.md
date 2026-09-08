@@ -266,6 +266,40 @@ This is also why the pydantic models type `fact_type` as `str` rather than as
 an `Enum`. Validating it against a closed set at the API boundary would
 reimpose exactly the constraint the SQL was written to avoid.
 
+### `subject` is free text too, which creates its own problem
+
+`fact_type` being open vocabulary is a design choice; `subject` being open
+vocabulary is a fact about the source material, and it creates a failure mode
+`fact_type` does not have. Two facts about the exact same entity can carry two
+different `subject` strings, because two documents wrote it differently:
+"Delhivery" and "Delhivery Limited" both appear as `subject` in the committed
+corpus's own sustainability report, sitting a few rows apart in `facts`. A
+subject search for one misses the other. A grouped view splits one entity into
+two rows for no reason a reader can see.
+
+`services/entity.py` computes a `canonical_subject` at write time — a matching
+KEY, not a display name — that both spellings resolve to, and `GET /facts`
+matches against it as well as the raw string, so a filter for either spelling
+finds both. `GET /subjects` reports the result the same way `GET /schema`
+reports `fact_types`: observed groupings, not a directory of expected entities.
+
+**The line this draws is deliberate, and narrow.** Only MECHANICAL differences
+fold together — case, punctuation, whitespace, an unambiguous legal-form
+suffix (`Ltd`, `Inc`, `Corp`, ...), an unambiguous address abbreviation (`St`,
+`Rd`, `Ave`, ...). "RBI" and "Reserve Bank of India" are deliberately **not**
+folded, even though a person reading both would know they match: that identity
+is not verifiable from the string alone, and guessing risks merging two facts
+that are not actually about the same subject. The same caution excludes
+structural words like `Group` or `Holdings` from the suffix list — a holding
+company and its subsidiary are often distinct subjects that happen to share a
+name, and stripping `Ltd` cannot turn one company into a different one the way
+stripping `Holdings` might.
+
+The computation is pure and free, the same shape as evidence sufficiency:
+`canonicalize_subject()` is a function of `subject` alone, so
+`POST /documents/resolve-subjects` can backfill an existing corpus with zero
+model calls, and re-running it is a no-op once every row agrees.
+
 ---
 
 ## 5. Extraction and grounding

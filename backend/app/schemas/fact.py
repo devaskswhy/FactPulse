@@ -86,6 +86,15 @@ class Fact(FactBase):
         default_factory=list,
         description="What the quote leaves out, in plain language.",
     )
+    canonical_subject: str | None = Field(
+        None,
+        description=(
+            "Matching key for `subject` -- e.g. 'Acme Corp' and 'Acme "
+            "Corporation' both resolve to the same key. For filtering and "
+            "grouping, not for display; see GET /subjects for the "
+            "human-readable spellings folded into each key."
+        ),
+    )
     superseded_by: int | None = Field(
         None,
         description=(

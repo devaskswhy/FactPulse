@@ -24,6 +24,7 @@ from app.schemas.fact import (
     ReviewList,
     SchemaResponse,
 )
+from app.schemas.entity import SubjectRegistryResponse
 from app.schemas.relationship import RelatedFact, RelationshipList
 from app.services.render import PageRenderError, page_dimensions, scale_bbox
 
@@ -129,6 +130,30 @@ def get_schema(conn: sqlite3.Connection = Depends(db_dependency)) -> SchemaRespo
         total_types=len(types),
         total_facts=repo.count_facts(conn),
         fact_types=types,
+    )
+
+
+@router.get(
+    "/subjects",
+    response_model=SubjectRegistryResponse,
+    summary="The subject registry: which spellings resolve to the same entity",
+)
+def get_subjects(conn: sqlite3.Connection = Depends(db_dependency)) -> SubjectRegistryResponse:
+    """Observed subject identities, not a directory of expected ones.
+
+    Mirrors GET /schema: that endpoint reports the fact_type vocabulary the
+    corpus actually produced, this one reports the subject identities it
+    actually produced -- after `canonicalize_subject` folds "Acme Corp" and
+    "Acme Corporation" together. A group with more than one variant is
+    evidence the fold did something; a group of one is just a subject nobody
+    has written a second way yet.
+    """
+    subjects = repo.subject_registry(conn)
+    return SubjectRegistryResponse(
+        total_canonical=len(subjects),
+        total_facts=sum(s.fact_count for s in subjects),
+        merged_count=sum(1 for s in subjects if len(s.variants) > 1),
+        subjects=subjects,
     )
 
 

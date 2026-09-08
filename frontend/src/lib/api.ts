@@ -167,6 +167,11 @@ export type Fact = {
    */
   evidence_strength: "full" | "partial" | "insufficient" | null;
   evidence_gaps: string[];
+  /**
+   * Matching key for `subject` -- "Acme Corp" and "Acme Corporation" share
+   * one. For grouping/filtering, not for display; show `subject` to a person.
+   */
+  canonical_subject: string | null;
   /** Id of a later fact that replaced this one, or null if still current. */
   superseded_by: number | null;
 };
@@ -212,6 +217,28 @@ export type SchemaResponse = {
   total_types: number;
   total_facts: number;
   fact_types: FactType[];
+};
+
+export type SubjectVariant = {
+  subject: string;
+  fact_count: number;
+};
+
+export type SubjectGroup = {
+  /** Matching key from canonicalize_subject -- not for display. */
+  canonical: string;
+  /** Raw spellings folded into this key, most common first. */
+  variants: SubjectVariant[];
+  fact_count: number;
+  example_fact_id: number;
+};
+
+export type SubjectRegistryResponse = {
+  total_canonical: number;
+  total_facts: number;
+  /** Canonical subjects folded from more than one raw spelling. */
+  merged_count: number;
+  subjects: SubjectGroup[];
 };
 
 export type EvidenceBundle = {
@@ -287,6 +314,10 @@ export function getFacts(filters: FactFilters = {}): Promise<FactList> {
 
 export function getSchema(): Promise<SchemaResponse> {
   return request<SchemaResponse>("/schema");
+}
+
+export function getSubjects(): Promise<SubjectRegistryResponse> {
+  return request<SubjectRegistryResponse>("/subjects");
 }
 
 export function getEvidence(factId: number): Promise<EvidenceBundle> {

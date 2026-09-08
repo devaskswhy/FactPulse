@@ -13,6 +13,7 @@ from app.schemas.document import (
     DocumentUploadResponse,
     RechunkResponse,
 )
+from app.schemas.entity import SubjectGroup, SubjectRegistryResponse, SubjectVariant
 from app.schemas.fact import (
     BBox,
     Fact,
@@ -60,6 +61,9 @@ __all__ = [
     "KNOWN_ISSUE_TYPES",
     "KNOWN_RELATIONSHIP_TYPES",
     "RechunkResponse",
+    "SubjectGroup",
+    "SubjectRegistryResponse",
+    "SubjectVariant",
     "Relationship",
     "RelationshipBase",
     "RelationshipCreate",

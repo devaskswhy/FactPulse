@@ -67,13 +67,18 @@ CREATE TABLE IF NOT EXISTS facts (
     -- whether it is ENOUGH. See services/grounding.py.
     evidence_strength TEXT,
     -- Plain-language list of what the quote leaves out, joined by '; '.
-    evidence_gaps     TEXT
+    evidence_gaps     TEXT,
+    -- Matching key for `subject`, computed by services/entity.py so that
+    -- "Acme Corp" and "Acme Corporation" collapse to one entity for
+    -- filtering and grouping. NOT for display -- see that module.
+    canonical_subject TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_facts_document_id ON facts(document_id);
-CREATE INDEX IF NOT EXISTS idx_facts_chunk_id    ON facts(chunk_id);
-CREATE INDEX IF NOT EXISTS idx_facts_fact_type   ON facts(fact_type);
-CREATE INDEX IF NOT EXISTS idx_facts_subject     ON facts(subject);
+CREATE INDEX IF NOT EXISTS idx_facts_document_id       ON facts(document_id);
+CREATE INDEX IF NOT EXISTS idx_facts_chunk_id          ON facts(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_facts_fact_type         ON facts(fact_type);
+CREATE INDEX IF NOT EXISTS idx_facts_subject           ON facts(subject);
+CREATE INDEX IF NOT EXISTS idx_facts_canonical_subject ON facts(canonical_subject);
 
 -- -------------------------------------------------------- fact_attributes
 --

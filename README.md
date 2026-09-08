@@ -98,12 +98,13 @@ cd backend
 pytest
 ```
 
-64 tests. Most cover ingestion, quote grounding, evidence sufficiency,
-temporal ordering, supersession direction, the review queue and key/model
-rotation with the model stubbed, so they are deterministic and need no API key. Five
-exercise the live relationship classifier on synthetic inputs — including the
-brief's own resigned-director case — and they **skip cleanly** when no key is
-configured or every model's daily free-tier quota is spent.
+86 tests. Most cover ingestion, quote grounding, evidence sufficiency,
+temporal ordering, supersession direction, canonical subject resolution, the
+review queue and key/model rotation with the model stubbed, so they are
+deterministic and need no API key. Five exercise the live relationship
+classifier on synthetic inputs — including the brief's own resigned-director
+case — and they **skip cleanly** when no key is configured or every model's
+daily free-tier quota is spent.
 
 ---
 
@@ -211,6 +212,26 @@ and the comparison view strikes through whichever card is no longer current.
 > documents that restate a **current state** — a board, a registered office, a
 > credit rating — across two dates. The behaviour is covered by tests against
 > the live model in `tests/test_relationships.py`.
+
+### The same entity, written two ways
+
+Two documents call the same company "Delhivery" and "Delhivery Limited". This
+isn't hypothetical — it's the committed corpus's own sustainability report,
+where both spellings sit a few facts apart. A subject search for one used to
+miss the other; a grouped view split one company into two rows.
+
+`services/entity.py` computes a matching key at write time — mechanical
+differences only (case, punctuation, a legal-form suffix, an address
+abbreviation like `St`/`Street`), never a semantic guess. "RBI" and "Reserve
+Bank of India" are deliberately **not** merged: that identity isn't verifiable
+from the string, and guessing risks merging two facts that aren't actually
+about the same subject.
+
+**See it live:** Fact Explorer → group by `subject` → the "Delhivery" group
+carries a `2 spellings merged` badge. Or `GET /subjects` for the registry
+view, which mirrors `GET /schema`'s "observed, not designed" framing — this
+lists the subject identities the corpus actually produced, not ones anyone
+declared in advance.
 
 ### Grounding is not the same as sufficiency
 

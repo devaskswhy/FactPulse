@@ -161,6 +161,44 @@ Other review items worth showing:
 
 ---
 
+## Case 5 — Same entity, two spellings
+
+Fully within the committed corpus, no synthetic data. Doc 8, the Delhivery
+sustainability excerpt, writes its own subject's name two ways across facts a
+few rows apart:
+
+| | Fact 238 | Fact 318 |
+| --- | --- | --- |
+| Stored `subject` | `Delhivery Limited` | `Delhivery` |
+| Statement | "Delhivery was EBITDA profitable in FY24." | "Total Scope 3 emissions for Delhivery in FY24 were 576,188.2 metric tonnes..." |
+
+Neither is wrong — the document itself mixes the full legal name with the
+short form, the way real filings do. Left as raw strings, a subject search or
+grouped view for one spelling would silently miss facts stored under the
+other. Across the whole corpus 5 canonical subjects fold two raw spellings
+together this way (`delhivery`, `global economy`, `headline inflation`, `core
+inflation`, `fuel inflation`), out of 335 facts and 177 distinct entities.
+
+**Find it in the app:** Fact Explorer → group by `subject` → the `delhivery`
+group shows a `2 spellings merged` badge and both spellings' facts underneath
+one heading. Or `GET /subjects` for the raw registry — mirrors `GET /schema`.
+
+**Why this is not the brief's address example, exactly, but is the same
+mechanism.** The brief's example is one entity's address written two ways
+across two *different* documents. This corpus's naturally-occurring case
+happens to be one entity's name written two ways within *one* document, plus a
+second real instance where "Delhivery Limited" (doc 5, the earnings-call deck)
+and "Delhivery" (doc 8, the sustainability report) are the same company across
+*different* documents. The underlying mechanism — a deterministic
+`canonicalize_subject()` folding mechanical spelling differences, covering
+legal suffixes AND address abbreviations (`St`/`Street`, `Rd`/`Road`, ...) so
+the address case works identically — is verified directly against the brief's
+own address-written-two-ways pattern in `tests/test_entity.py`, since the
+committed corpus does not happen to contain two documents restating one
+address.
+
+---
+
 ## What I tried and could not get
 
 **A Delhivery prospectus-vs-annual-report pair.** The brief suggests it, and it
@@ -187,4 +225,23 @@ Two honest notes about that pair:
   relationships — the engine is not inventing connections to look busy.
 
 **To reproduce once quota resets:** ingest pages 48–53 of the prospectus and
-21–26 of the annual report (9 and 17 chunks respectively).
+21–26 of the annual report (9 and 17 chunks respectively). Since this was
+written the pipeline gained multi-key rotation (README, "Free-tier rate limits
+are the binding constraint") — three keys against seven models is 21
+independent daily allowances rather than 7, which makes exhausting the whole
+pool mid-demo considerably less likely on a retry.
+
+## A fifth relationship type with nothing to show it
+
+`supersedes` — a later document recording that a current state changed, the
+brief's own resigned-director example — is implemented, unit-tested against
+the live model (`tests/test_relationships.py`), and verified end-to-end
+including the direction-resolution logic that decides which of two facts is
+current. The committed corpus contains **zero** supersessions, and that is the
+correct answer for it: three macro institutions and one logistics company's
+sustainability report argue about *measurements*, which is contradiction or
+reconciliation, not a state that changed. Demonstrating it live would need a
+document restating a current state — a board, a registered office, a credit
+rating — across two dates, which none of the five source documents happen to
+do. Documented rather than staged: see ARCHITECTURE §6, "Supersession: when
+the world changed rather than a source being wrong".

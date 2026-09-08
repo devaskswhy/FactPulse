@@ -10,10 +10,12 @@ from __future__ import annotations
 import sqlite3
 
 from app.schemas.document import Chunk, Document
+from app.schemas.entity import SubjectGroup, SubjectVariant
 from app.schemas.fact import BBox, Fact, FactAttribute, FactType, Grounding
 from app.schemas.relationship import Relationship
 from app.schemas.review import ReviewItem
 from app.services.chunker import ChunkDraft
+from app.services.entity import canonicalize_subject
 
 # ------------------------------------------------------------------ documents
 
@@ -174,6 +176,7 @@ def _to_fact(row: sqlite3.Row, attributes: list[FactAttribute] | None = None) ->
         created_at=row["created_at"],
         grounding=grounding,
         attributes=attributes or [],
+        canonical_subject=_column(row, "canonical_subject"),
         evidence_strength=_column(row, "evidence_strength"),
         evidence_gaps=[
             g for g in (_column(row, "evidence_gaps") or "").split("; ") if g
@@ -200,17 +203,20 @@ def insert_fact(
     evidence_gaps: str | None = None,
 ) -> int:
     x0, y0, x1, y1 = bbox if bbox else (None, None, None, None)
+    # Computed here, not passed in, so every caller gets it for free and it
+    # can never drift out of sync with `subject` -- see services/entity.py.
+    canonical_subject = canonicalize_subject(subject)
     cur = conn.execute(
         "INSERT INTO facts (document_id, chunk_id, fact_type, subject, statement, "
         "normalized_value, unit, time_scope, quote, page_number, "
         "bbox_x0, bbox_y0, bbox_x1, bbox_y1, confidence, "
-        "evidence_strength, evidence_gaps) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "evidence_strength, evidence_gaps, canonical_subject) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             document_id, chunk_id, fact_type, subject, statement,
             normalized_value, unit, time_scope, quote, page_number,
             x0, y0, x1, y1, confidence,
-            evidence_strength, evidence_gaps,
+            evidence_strength, evidence_gaps, canonical_subject,
         ),
     )
     return int(cur.lastrowid)
@@ -262,8 +268,14 @@ def list_facts(
         clauses.append("fact_type = ?")
         params.append(fact_type)
     if subject:
-        clauses.append("subject LIKE ?")
+        # Matches the raw substring OR the canonical form, so a search for
+        # "Acme Corp" also finds facts stored under "Acme Corporation" --
+        # see services/entity.py. The substring arm is kept for subjects the
+        # canonicalizer had nothing to fold (a single free-text mention with
+        # no legal suffix or address word).
+        clauses.append("(subject LIKE ? OR canonical_subject = ?)")
         params.append(f"%{subject}%")
+        params.append(canonicalize_subject(subject))
     if min_confidence is not None:
         clauses.append("confidence >= ?")
         params.append(min_confidence)
@@ -309,8 +321,9 @@ def count_facts(
         clauses.append("fact_type = ?")
         params.append(fact_type)
     if subject:
-        clauses.append("subject LIKE ?")
+        clauses.append("(subject LIKE ? OR canonical_subject = ?)")
         params.append(f"%{subject}%")
+        params.append(canonicalize_subject(subject))
     if min_confidence is not None:
         clauses.append("confidence >= ?")
         params.append(min_confidence)
@@ -381,6 +394,79 @@ def resync_fact_types(conn: sqlite3.Connection) -> int:
             "example_fact_id = COALESCE(fact_types.example_fact_id, excluded.example_fact_id)",
             (row["fact_type"], row["example"], row["n"]),
         )
+
+
+# --------------------------------------------------------------- subjects
+
+
+def backfill_canonical_subjects(
+    conn: sqlite3.Connection, document_id: int | None = None
+) -> int:
+    """Recompute `canonical_subject` for every row, correcting drift.
+
+    Pure and idempotent, like `assess_evidence_backfill`: canonicalize_subject
+    is a function of `subject` alone, so this can be re-run freely -- after
+    the corpus existed before the column did, or after the canonicalizer's
+    rules changed and old rows carry a stale key. Only rows whose stored value
+    is actually wrong are written, so a no-op run touches nothing.
+    """
+    where = " WHERE document_id = ?" if document_id is not None else ""
+    params: tuple[object, ...] = (document_id,) if document_id is not None else ()
+    rows = conn.execute(
+        f"SELECT id, subject, canonical_subject FROM facts{where}", params
+    ).fetchall()
+
+    updated = 0
+    for row in rows:
+        want = canonicalize_subject(row["subject"])
+        if want != row["canonical_subject"]:
+            conn.execute(
+                "UPDATE facts SET canonical_subject = ? WHERE id = ?",
+                (want, row["id"]),
+            )
+            updated += 1
+    return updated
+
+
+def subject_registry(conn: sqlite3.Connection) -> list[SubjectGroup]:
+    """Every canonical subject, with the raw spellings folded into it.
+
+    Aggregated on read, like `superseded_by_map`, rather than maintained as a
+    table: there is nothing here a plain GROUP BY cannot answer, and a second
+    write path to keep in sync would be a second way for it to drift.
+
+    Grouped by (canonical_subject, subject) rather than concatenating variant
+    strings in SQL -- a subject can itself contain a comma (an address does),
+    which would make a delimited string ambiguous to split back apart.
+    """
+    rows = conn.execute(
+        "SELECT canonical_subject, subject, COUNT(*) AS n, MIN(id) AS example_id "
+        "FROM facts WHERE canonical_subject IS NOT NULL AND canonical_subject != '' "
+        "GROUP BY canonical_subject, subject"
+    ).fetchall()
+
+    groups: dict[str, dict[str, object]] = {}
+    for row in rows:
+        key = row["canonical_subject"]
+        bucket = groups.setdefault(
+            key, {"variants": [], "fact_count": 0, "example_fact_id": row["example_id"]}
+        )
+        bucket["variants"].append(
+            SubjectVariant(subject=row["subject"], fact_count=row["n"])
+        )
+        bucket["fact_count"] += row["n"]
+        bucket["example_fact_id"] = min(bucket["example_fact_id"], row["example_id"])
+
+    result = [
+        SubjectGroup(
+            canonical=key,
+            variants=sorted(v["variants"], key=lambda x: -x.fact_count),
+            fact_count=v["fact_count"],
+            example_fact_id=v["example_fact_id"],
+        )
+        for key, v in groups.items()
+    ]
+    return sorted(result, key=lambda g: (-g.fact_count, g.canonical))
     return len(rows)
 
 

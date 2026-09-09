@@ -14,6 +14,16 @@ class HealthResponse(BaseModel):
     gemini_configured: bool = Field(
         ..., description="True when at least one Gemini API key is configured."
     )
+    embedding_model: str = Field(
+        "",
+        description=(
+            "The embedding model name actually in use, after normalisation. "
+            "Exposed because a misconfigured value here breaks linking while "
+            "extraction keeps working, so uploads silently produce facts with "
+            "no relationships -- a failure that is otherwise invisible from "
+            "outside the container."
+        ),
+    )
     model_pool: dict = Field(
         default_factory=dict,
         description=(

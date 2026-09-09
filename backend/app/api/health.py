@@ -29,5 +29,6 @@ def health() -> HealthResponse:
         database=db_status,
         tables=tables,
         gemini_configured=settings.gemini_configured,
+        embedding_model=settings.embedding_model,
         model_pool=pool_status(),
     )

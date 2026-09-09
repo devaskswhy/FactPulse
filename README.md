@@ -1,70 +1,93 @@
+<p align="center">
+  <img src="docs/img/banner.svg" alt="FactPulse — two documents disagree; the useful answer is almost never contradiction" width="100%">
+</p>
+
 # FactPulse
+
+**Superjoin VIT 2026 · Engineering Intern**
 
 [![CI](https://github.com/devaskswhy/FactPulse/actions/workflows/ci.yml/badge.svg)](https://github.com/devaskswhy/FactPulse/actions/workflows/ci.yml)
 
-A **fact knowledge layer**. FactPulse extracts facts from PDFs, grounds each
-one in the exact source span it came from, and detects whether facts across
-documents **corroborate**, **contradict**, can be **reconciled** through
-context — time period, scope, or units — or **supersede** one another when a
-later document records that the situation changed.
+[**Live app**](https://fact-pulse-mu.vercel.app) · [**API docs**](https://factpulse-production.up.railway.app/docs) · [Architecture](docs/ARCHITECTURE.md) · [The four cases, with IDs](docs/DEMO_CASES.md) · [The failure, in full](docs/FAILURE_CASE.md) · [Deploying](docs/DEPLOY.md)
 
 > Two documents say revenue was $4.2M and $5.1M. The useful answer is rarely
-> "contradiction" — it is usually "different fiscal period" or "one is a
-> segment, one is consolidated". FactPulse is built to tell those apart, and to
-> show you the page and rectangle each claim came from.
+> **"contradiction"** — it is usually *different fiscal period*, or *one is a
+> segment and one is consolidated*.
+>
+> FactPulse extracts every checkable claim from a PDF, pins each one to the
+> **exact rectangle** it came from, and works out whether facts across documents
+> agree, genuinely conflict, or only look like they do. **No fact exists here
+> without a page and a box you can point at.**
 
-All four required cases are reproducible in the running app against the
-committed corpus, and none of them is hardcoded anywhere in the pipeline:
+---
 
-| Case | Example |
-| --- | --- |
-| **Corroborates** | RBI and the IMF both report FY2024-25 headline inflation at 4.6%, in wording that shares almost no phrasing |
-| **Contradicts** | RBI says global growth was 3.5% in 2023; the Economic Survey says 3.3%. Same metric, same period, different WEO vintages — and neither document says so |
-| **Reconciled** | RBI's *actual* 3.3% global growth for 2024 vs the Survey's IMF *projection* of 3.2% for the same year — reconciled by definition, not by period |
-| **Failure** | A waste-intensity figure of 23.3 extracted correctly with no unit, because the table never states one. Caught by the self-check, not discarded |
+## The one-minute version
 
-Exact fact IDs are in [docs/DEMO_CASES.md](docs/DEMO_CASES.md).
+|  |  |
+|---|---|
+| **Problem** | The same figure appears in two filings with different numbers. Almost always the difference is period, scope, unit or basis — but a keyword search can only tell you the strings differ, not why. |
+| **Approach** | Extract typed facts. Ground each to a quote, page and bounding box. Embed, retrieve by cosine, and have the model return a **verdict plus a rationale citing both sides**. |
+| **On the corpus** | **5 documents · 335 facts · 179 discovered fact types · 53 relationships**, every one cross-document |
+| **The verdict split** | 14 corroborates · 2 contradicts · 37 reconciled — *most apparent conflicts are not conflicts*, which is the entire thesis |
+| **The uncomfortable number** | Only **129 of 335 facts** carry evidence strong enough to stand alone. The system grades that and shows it, rather than hiding it behind a green checkmark |
+| **Schema** | `fact_type` is free text. 179 types, **none predefined** — the model names each kind of fact when it first meets one |
+| **Cost to try it** | **Zero.** A fresh clone auto-loads the corpus with no model calls and no API key |
+
+---
+
+## Why this shape, and not a classifier
+
+The brief asks for a system that identifies when facts *"corroborate, contradict,
+or can be reconciled through context"* — and warns that **"a graph database or
+visualization alone is not the solution."**
+
+The obvious build is a pairwise classifier over fact text. It gets case 3 wrong
+in a way no amount of model quality fixes, because *3.3% actual* and *3.2%
+projected* are not distinguishable from the two sentences alone — the difference
+lives in a **basis** the classifier was never given as a field.
+
+So FactPulse makes the opposite bet: **the axes a disagreement can differ on are
+real columns.** `normalized_value`, `unit` and `time_scope` are typed columns
+precisely because the classifier has to see them side by side to tell "different
+period" from "different answer". Everything follows from that one decision —
+why the schema is part-fixed and part-EAV, why the verdict carries a named
+reconciling dimension, and why a fifth verdict had to exist.
+
+<p align="center">
+  <img src="docs/img/pipeline.svg" alt="The pipeline: parse, chunk, extract, ground, embed, link, review" width="100%">
+</p>
 
 ---
 
 ## Setup and Run Instructions
 
-**Requirements:** Python 3.11+, Node 18+, and a free Gemini API key.
+**Requirements:** Python 3.11+, Node 18+. A free Gemini API key is needed only
+to ingest *new* PDFs — the committed corpus loads without one.
 
-### 1. Get a free Gemini API key
-
-Go to **<https://aistudio.google.com/apikey>**, sign in with a Google account,
-and click *Create API key*. No billing setup is required — the free tier is
-enough to run this project. Copy the key; you will paste it into `.env` below.
-
-### 2. Backend — http://127.0.0.1:8000
+### 1. Backend — http://127.0.0.1:8000
 
 ```bash
 cd backend
-
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # macOS / Linux
 
 pip install -r requirements.txt
-
-cp .env.example .env            # then open .env and set GEMINI_API_KEY
+cp .env.example .env            # optional: set GEMINI_API_KEY to ingest new PDFs
 
 uvicorn main:app --reload
 ```
 
-The SQLite schema is created automatically on first start, and so is the
-demo corpus — a fresh database has no facts yet, and the backend notices that
-and loads the committed 335-fact corpus with zero model calls (see
-"The offline demo seed" below). Check it came up:
+The schema is created on first start, **and so is the corpus** — an empty
+database auto-loads the committed 335 facts with zero model calls.
 
-- Health: <http://127.0.0.1:8000/health>
-- Interactive API docs: <http://127.0.0.1:8000/docs>
-- `curl http://127.0.0.1:8000/facts?limit=1` should already report `"total": 335`
+```bash
+curl http://127.0.0.1:8000/facts?limit=1     # already reports "total": 335
+```
 
-### 3. Frontend — http://localhost:3000
+- Health: <http://127.0.0.1:8000/health> · API docs: <http://127.0.0.1:8000/docs>
 
-In a second terminal:
+### 2. Frontend — http://localhost:3000
 
 ```bash
 cd frontend
@@ -72,45 +95,53 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:3000>. Scroll past the explainer to reach the app.
+`frontend/.env.local` is optional; the API URL defaults to `http://127.0.0.1:8000`.
 
-`frontend/.env.local` is optional — the API URL defaults to
-`http://127.0.0.1:8000`. Copy `.env.local.example` to `.env.local` only if your
-backend runs elsewhere.
+### 3. Add your own PDF
 
-### 4. Add a document
-
-Use the **Upload** screen in the UI, or:
+Use the **Upload** screen, or:
 
 ```bash
-curl -F "file=@samples/starter-datasets/india-macroeconomy/02-rbi-annual-report-2024-25-excerpt.pdf" \
-     http://127.0.0.1:8000/documents
+curl -F "file=@your.pdf" http://127.0.0.1:8000/documents
 ```
 
-A 100-page report takes several minutes and roughly one model call per chunk.
-On the free tier, **start with a 10–15 page slice** — see *Limitations*. To
-ingest a folder with a page limit:
+A 100-page report is roughly one model call per chunk. On the free tier, start
+with a **10–15 page slice** — see [*Limitations*](#limitations-and-next-steps).
+To ingest a folder with a page limit:
 
 ```bash
 cd backend
-python scripts/bulk_ingest.py ../samples/starter-datasets/india-macroeconomy --pages 1-12
+python scripts/bulk_ingest.py <folder> --pages 1-12
 python scripts/bulk_ingest.py <folder> --dry-run   # chunk counts, no API calls
 ```
+
+### 4. Get a Gemini key (only for new PDFs)
+
+<https://aistudio.google.com/apikey> — no billing required. Quota is metered
+**per project, per model, per day**, so keys from *different* Google accounts
+are independent allowances:
+
+```
+GEMINI_API_KEY=...
+GEMINI_API_KEY_2=...     # a key from a DIFFERENT Google account
+GEMINI_API_KEY_3=...
+```
+
+Three keys against seven models is **21 independent daily allowances**, rotated
+keys-first so the preferred model is used as long as any key still has quota for
+it. `GET /health` reports how many slots remain — labelled `key1/model-name`,
+never the key itself.
 
 ### 5. Tests
 
 ```bash
-cd backend
-pytest
+cd backend && pytest
 ```
 
-96 tests. Most cover ingestion, quote grounding, evidence sufficiency,
-temporal ordering, supersession direction, canonical subject resolution, the
-offline demo seed, the review queue and key/model rotation with the model
-stubbed, so they are deterministic and need no API key. Five exercise the
-live relationship classifier on synthetic inputs — including the brief's own
-resigned-director case — and they **skip cleanly** when no key is configured
-or every model's daily free-tier quota is spent.
+**96 tests.** 91 run against a stubbed model — deterministic, no API key, no
+network. Five exercise the live classifier on synthetic inputs, including the
+brief's own resigned-director case, and **skip cleanly** when no key is
+configured.
 
 ---
 
@@ -118,8 +149,8 @@ or every model's daily free-tier quota is spent.
 
 **[Demo video — link to be added]**
 
-A shot-by-shot script is in [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md), built
-against the specific facts catalogued in
+A shot-by-shot script is in [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md), written
+against the exact fact IDs catalogued in
 [docs/DEMO_CASES.md](docs/DEMO_CASES.md), so nothing has to be found live on
 camera.
 
@@ -127,35 +158,64 @@ camera.
 
 ## The four required cases
 
-Every one is reproducible in the running app against the committed corpus, with
-exact fact and relationship ids in
-[docs/DEMO_CASES.md](docs/DEMO_CASES.md). None is hardcoded anywhere in the
-pipeline — no document name, fact id, or figure appears in the extraction or
-relationship code.
+Every one is reproducible in the running app against the committed corpus.
+**None is hardcoded anywhere in the pipeline** — no document name, fact id, or
+figure appears in the extraction or relationship code. Exact IDs and search
+terms in [docs/DEMO_CASES.md](docs/DEMO_CASES.md).
 
-| # | Case | Where |
-| --- | --- | --- |
-| 1 | **Corroborated across documents, expressed differently** — RBI and the IMF both report FY2024-25 headline inflation at 4.6%, in wording sharing almost no phrasing | Relationship 19, facts 99 + 194 |
-| 2 | **Genuine contradiction** — RBI says global growth was 3.5% in 2023; the Economic Survey says 3.3%. Same metric, same period, different WEO vintages, and neither document says so | Relationship 14, facts 83 + 12 |
-| 3 | **Apparent contradiction explained by context** — 3.3% *actual* vs 3.2% *IMF projection* for the same year. Reconciled by definition, not by period | Relationship 10, facts 78 + 13 |
-| 4 | **Extraction failure and how it was handled** — a waste-intensity figure of 23.3 extracted correctly with **no unit**, because the table never states one. Caught by the post-ingestion self-check, kept and queued rather than dropped | [docs/FAILURE_CASE.md](docs/FAILURE_CASE.md), fact 295 |
+### 1 · Corroborated across documents, expressed differently
 
-The first three show the source evidence (page image with the quote boxed) and
-the system's own rationale citing both sides.
+> **Relationship 19** — facts **99** ↔ **194** · confidence 1.00
+
+RBI and the IMF both report FY2024-25 headline inflation at **4.6%**, in wording
+sharing almost no phrasing — *"moderated to an average of"* against *"was … on
+average"* — and the periods are written differently (`2024-25` vs `FY2024/25`).
+Matched on meaning, not string overlap. Both facts have bounding boxes, so the
+highlight shows on both source pages.
+
+### 2 · A genuine contradiction
+
+> **Relationship 14** — facts **83** ↔ **12** · confidence 1.00
+
+RBI says global growth was **3.5%** in 2023; the Economic Survey says **3.3%**.
+Same metric, same period. The real cause is that the two institutions quote
+different vintages of the IMF's World Economic Outlook — **and neither document
+says so**, which is precisely the test for `contradicts` rather than
+`reconciled`. There is no reconciling context available in the sources.
+
+### 3 · An apparent contradiction explained by context
+
+> **Relationship 10** — facts **78** ↔ **13** · *[definition]*
+
+**3.3% actual** against **3.2% IMF projection**, same year. The reconciling axis
+is not time or units but *what the number is*: an outcome versus a forecast. The
+UI renders that axis as a `DIFFERS BY DEFINITION` chip above the rationale.
+
+### 4 · An extraction failure, and how it was handled
+
+> **Fact 295** · review item **43** — [full write-up](docs/FAILURE_CASE.md)
+
+A waste-intensity figure of **23.3** extracted correctly from a BRSR table with
+**no unit**, because the table never states one. The number is right and
+uninterpretable. Caught automatically by the post-ingestion self-check as
+`ambiguous_unit`, **kept and queued rather than dropped** — a fact the system
+cannot fully interpret is exactly what a human should see.
+
+---
 
 ## Brownie points
 
-All four suggested extensions are implemented, plus three of our own.
+All four suggested extensions, plus three the project added on its own.
 
-| Extension | How | Detail |
-| --- | --- | --- |
-| **Large PDFs without performance issues** | Bounded concurrency, streamed progress, page-image caching. Measured 3.08× on a 10-chunk burst; honest about free-tier throughput pacing beyond that | [ARCHITECTURE §9](docs/ARCHITECTURE.md) |
-| **Many PDFs in one knowledge layer** | Every relationship in the corpus is cross-document. The candidate pool is loaded once per ingest as a matrix, not once per fact | [ARCHITECTURE §6](docs/ARCHITECTURE.md) |
-| **A schema that evolves dynamically** | `fact_type` is free text with an EAV sidecar — 179 types discovered, none predefined, and the registry makes the growth visible | [ARCHITECTURE §4](docs/ARCHITECTURE.md) |
-| **New documents incrementally** | A new document is embedded and compared against the existing layer; nothing already stored is re-extracted, re-embedded or re-judged | [ARCHITECTURE §8](docs/ARCHITECTURE.md) |
-| *Evidence sufficiency* | A verified quote is not a sufficient one. Every fact is graded full / partial / insufficient — 129/103/103 on this corpus | [ARCHITECTURE §5](docs/ARCHITECTURE.md) |
-| *A fifth verdict: supersedes* | A resigned director is not a contradiction, it is a change. Directional, with the dates overruling the classifier when they disagree | [ARCHITECTURE §6](docs/ARCHITECTURE.md) |
-| *Canonical subject resolution* | "Delhivery" and "Delhivery Limited" resolve to one entity — mechanical folding only, never a semantic guess | [ARCHITECTURE §4](docs/ARCHITECTURE.md) |
+| Extension | How it is handled |
+|---|---|
+| **Large PDFs without performance issues** | Bounded concurrency, SSE progress, cached page renders. Measured **3.08×** on a 10-chunk burst — and honest that it is a burst figure, since sustained throughput is paced server-side ([§9](docs/ARCHITECTURE.md)) |
+| **Many PDFs in one knowledge layer** | **All 53 relationships are cross-document.** The candidate pool loads once per ingest as one matrix, not once per fact ([§6](docs/ARCHITECTURE.md)) |
+| **A schema that evolves dynamically** | `fact_type` is free text + EAV. 137 types before one upload during development, **179 after** — gaining `waste-generation`, `air-emissions`, `emission-intensity` from pages nothing in the code anticipated ([§4](docs/ARCHITECTURE.md)) |
+| **New documents incrementally** | A new document is embedded and compared against the layer; **nothing already stored is re-extracted, re-embedded or re-judged** ([§8](docs/ARCHITECTURE.md)) |
+| **➕ Evidence sufficiency** | A verified quote is not a *sufficient* one. Every fact graded full / partial / insufficient — **129 / 103 / 103** here ([§5](docs/ARCHITECTURE.md)) |
+| **➕ A fifth verdict: `supersedes`** | A resigned director is not a contradiction, it is a **change**. Directional, and when the classifier's arrow disagrees with the dates, **the dates win** ([§6](docs/ARCHITECTURE.md)) |
+| **➕ Canonical subject resolution** | "Delhivery" and "Delhivery Limited" resolve to one entity — mechanical folding only, **never a semantic guess** ([§4](docs/ARCHITECTURE.md)) |
 
 ---
 
@@ -603,3 +663,14 @@ gitignored.
 | `GET /schema` | The discovered `fact_types` registry |
 | `GET /review-queue` | Flagged items with context |
 | `POST /review-queue/{id}/resolve` | accepted / rejected / edited |
+
+---
+
+<p align="center">
+  <sub>
+    Built for the Superjoin VIT 2026 Engineering Intern assignment.<br>
+    The starter documents are published macroeconomic and regulatory filings;
+    the PDFs themselves are gitignored, and the committed corpus is a database
+    snapshot of what the pipeline extracted from them.
+  </sub>
+</p>

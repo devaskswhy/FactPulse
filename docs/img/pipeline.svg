@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="The FactPulse pipeline: parse, chunk, extract, ground, embed, link, review — each step writing its own table">
+  <defs>
+    <style>
+      .sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#3a3a40" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="300" fill="#0a0a0c"/>
+
+  <text x="40" y="42" class="mono" font-size="11" letter-spacing="3" fill="#8b8b92">WHAT HAPPENS TO A DOCUMENT</text>
+  <text x="40" y="66" class="sans" font-size="14" fill="#5d5d66">Each step writes its own table, so any stage can be re-run without redoing the ones before it.</text>
+
+  <!-- seven stages -->
+  <g transform="translate(40, 104)">
+
+    <!-- 01 parse -->
+    <rect x="0" y="0" width="146" height="86" rx="8" fill="#131316" stroke="#232327"/>
+    <text x="16" y="24" class="mono" font-size="10" fill="#f5a623">01</text>
+    <text x="16" y="48" class="sans" font-size="15" fill="#f5f5f0">Parse</text>
+    <text x="16" y="70" class="mono" font-size="10" fill="#5d5d66">PyMuPDF &#183; text+layout</text>
+    <line x1="146" y1="43" x2="166" y2="43" stroke="#3a3a40" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+    <!-- 02 chunk -->
+    <rect x="172" y="0" width="146" height="86" rx="8" fill="#131316" stroke="#232327"/>
+    <text x="188" y="24" class="mono" font-size="10" fill="#f5a623">02</text>
+    <text x="188" y="48" class="sans" font-size="15" fill="#f5f5f0">Chunk</text>
+    <text x="188" y="70" class="mono" font-size="10" fill="#5d5d66">~900 tok, overlapped</text>
+    <line x1="318" y1="43" x2="338" y2="43" stroke="#3a3a40" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+    <!-- 03 extract -->
+    <rect x="344" y="0" width="146" height="86" rx="8" fill="#131316" stroke="#232327"/>
+    <text x="360" y="24" class="mono" font-size="10" fill="#f5a623">03</text>
+    <text x="360" y="48" class="sans" font-size="15" fill="#f5f5f0">Extract</text>
+    <text x="360" y="70" class="mono" font-size="10" fill="#5d5d66">Gemini &#183; typed by model</text>
+    <line x1="490" y1="43" x2="510" y2="43" stroke="#3a3a40" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+    <!-- 04 ground -->
+    <rect x="516" y="0" width="146" height="86" rx="8" fill="#131316" stroke="#f5a623" stroke-opacity="0.45"/>
+    <text x="532" y="24" class="mono" font-size="10" fill="#f5a623">04</text>
+    <text x="532" y="48" class="sans" font-size="15" fill="#f5f5f0">Ground</text>
+    <text x="532" y="70" class="mono" font-size="10" fill="#5d5d66">quote &#8594; page &#8594; bbox</text>
+    <line x1="662" y1="43" x2="682" y2="43" stroke="#3a3a40" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+    <!-- 05 embed -->
+    <rect x="688" y="0" width="146" height="86" rx="8" fill="#131316" stroke="#232327"/>
+    <text x="704" y="24" class="mono" font-size="10" fill="#f5a623">05</text>
+    <text x="704" y="48" class="sans" font-size="15" fill="#f5f5f0">Embed</text>
+    <text x="704" y="70" class="mono" font-size="10" fill="#5d5d66">768-dim, normalised</text>
+    <line x1="834" y1="43" x2="854" y2="43" stroke="#3a3a40" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+    <!-- 06 link -->
+    <rect x="860" y="0" width="146" height="86" rx="8" fill="#131316" stroke="#f5a623" stroke-opacity="0.45"/>
+    <text x="876" y="24" class="mono" font-size="10" fill="#f5a623">06</text>
+    <text x="876" y="48" class="sans" font-size="15" fill="#f5f5f0">Link</text>
+    <text x="876" y="70" class="mono" font-size="10" fill="#5d5d66">cosine &#8594; verdict</text>
+    <line x1="1006" y1="43" x2="1026" y2="43" stroke="#3a3a40" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+    <!-- 07 review -->
+    <rect x="1032" y="0" width="128" height="86" rx="8" fill="#131316" stroke="#232327"/>
+    <text x="1048" y="24" class="mono" font-size="10" fill="#f5a623">07</text>
+    <text x="1048" y="48" class="sans" font-size="15" fill="#f5f5f0">Review</text>
+    <text x="1048" y="70" class="mono" font-size="10" fill="#5d5d66">nothing discarded</text>
+  </g>
+
+  <!-- the two steps that carry the product's whole claim -->
+  <g transform="translate(40, 218)">
+    <rect x="476" y="0" width="1" height="18" fill="#f5a623" fill-opacity="0.45"/>
+    <rect x="820" y="0" width="1" height="18" fill="#f5a623" fill-opacity="0.45"/>
+    <rect x="476" y="18" width="345" height="1" fill="#f5a623" fill-opacity="0.45"/>
+    <text x="648" y="40" class="mono" font-size="11" fill="#f5a623" text-anchor="middle">the two steps everything else exists to serve</text>
+    <text x="648" y="60" class="sans" font-size="13" fill="#5d5d66" text-anchor="middle">a fact you can point at, and a verdict that explains itself</text>
+  </g>
+</svg>

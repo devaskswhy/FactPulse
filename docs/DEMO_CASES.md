@@ -1,9 +1,9 @@
-# Demo cases — shot list
+# The four required cases
 
-Four cases, all reproducible in the running app against the committed corpus.
-Fact and relationship IDs below are stable for the database this was recorded
-against; re-ingesting from scratch will renumber them, so the search terms are
-given as well.
+All four are reproducible in the running app against the committed corpus,
+which a fresh clone loads automatically with no API key and no model calls.
+Fact and relationship IDs below are stable for that committed corpus;
+re-ingesting from scratch renumbers them, so the search terms are given too.
 
 **Nothing here is hardcoded.** No document name, fact id, or figure appears
 anywhere in the extraction or relationship code. Every case below is what the
@@ -89,7 +89,8 @@ case 1, because fact 88 simultaneously **corroborates** the IMF's 6.5% and
 **contradicts** the Survey's 6.4% — the Survey figure is an earlier advance
 estimate later revised up. The engine is right that they conflict as stated;
 a domain expert would add the vintage explanation the documents omit. Note
-fact 10 has no bounding box, so use relationship 14 for the highlighter shot.
+fact 10 has no bounding box, so relationship 14 is the one that shows a
+highlight on both sides.
 
 **Find it in the app:** Fact Explorer → search `global economy grew` → open
 fact 12 → relationships tab.

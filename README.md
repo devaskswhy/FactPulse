@@ -150,10 +150,9 @@ configured.
 
 **[▶ Watch the 3-minute demo](https://drive.google.com/drive/folders/1XOeB6qVWUqC2jMUp0G_ClXS66236wgqU?usp=drive_link)**
 
-A shot-by-shot script is in [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md), written
-against the exact fact IDs catalogued in
-[docs/DEMO_CASES.md](docs/DEMO_CASES.md), so nothing has to be found live on
-camera.
+The four required cases shown in it are catalogued with exact fact and
+relationship IDs in [docs/DEMO_CASES.md](docs/DEMO_CASES.md), so each one can
+be reproduced in the running app rather than taken on trust.
 
 ---
 
@@ -675,7 +674,7 @@ backend/     FastAPI, SQLite, PyMuPDF, google-genai, numpy
   scripts/   bulk_ingest.py
   tests/     pytest
 frontend/    Next.js App Router, TypeScript, Tailwind, GSAP, Lenis
-docs/        ARCHITECTURE.md · DEMO_CASES.md · FAILURE_CASE.md · DEMO_SCRIPT.md
+docs/        ARCHITECTURE.md · DEMO_CASES.md · FAILURE_CASE.md · DEPLOY.md
 samples/     starter datasets (PDFs are gitignored)
 ```
 
@@ -689,7 +688,6 @@ gitignored.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The schema table by table, the pipeline, and the reasoning behind each decision |
 | [docs/DEMO_CASES.md](docs/DEMO_CASES.md) | The four required cases with exact fact IDs, verified against the API |
 | [docs/FAILURE_CASE.md](docs/FAILURE_CASE.md) | What the system got wrong, why the source made it hard, and what to do about it |
-| [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) | Shot-by-shot script for the demo video |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Deploying to Railway (backend) and Vercel (frontend), and what the free tier actually costs |
 
 ## API

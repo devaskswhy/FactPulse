@@ -97,7 +97,7 @@ def embed_texts(
         # we would wait through clears it.
         attempts = max(1, settings.extraction_max_attempts)
         response = None
-        embedding_model = settings.gemini_embedding_model
+        embedding_model = settings.embedding_model
         for attempt in range(attempts):
             # There is exactly one embedding model and no substitute for it, so
             # the generate pool's fallbacks cannot help. A second KEY can,

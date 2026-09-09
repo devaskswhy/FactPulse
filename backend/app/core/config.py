@@ -111,6 +111,22 @@ class Settings(BaseSettings):
         return p if p.is_absolute() else BACKEND_DIR / p
 
     @property
+    def embedding_model(self) -> str:
+        """The embedding model name, normalised.
+
+        Read through this rather than the raw setting. A deployment that sets
+        GEMINI_EMBEDDING_MODEL to an empty value -- easy to do by adding the
+        variable in a dashboard and leaving the box blank -- produced a model
+        name of "" and every embedding call failed with "unexpected model name
+        format". That broke linking on upload while extraction kept working,
+        so documents ingested and simply had no relationships, with the cause
+        only visible in a log line nobody was watching. A blank value now
+        means "unset", and a redundant "models/" prefix is tolerated.
+        """
+        name = (self.gemini_embedding_model or "").strip().removeprefix("models/")
+        return name or "gemini-embedding-001"
+
+    @property
     def fallback_models(self) -> list[str]:
         return [m.strip() for m in self.gemini_model_fallbacks.split(",") if m.strip()]
 

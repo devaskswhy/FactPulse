@@ -666,6 +666,56 @@ reader scrolling it.
 
 ---
 
+## Screenshots
+
+Every figure below is live from the committed corpus — real extracted facts,
+real bounding boxes, real model rationales. Nothing is mocked up.
+
+<p align="center">
+  <img src="docs/img/landing-hero.png" alt="The landing page: the thesis beside a real reconciled pair from the corpus, above the pipeline diagram" width="100%">
+</p>
+
+**The card on the right is not an illustration.** It is relationship 10 from the
+corpus — RBI's *actual* 3.3% against the Survey's IMF *projection* of 3.2%, same
+year — rendered with the values the API returns. The argument and an instance of
+the argument, side by side.
+
+<p align="center">
+  <img src="docs/img/evidence-highlight.png" alt="A fact with its verbatim quote boxed on the rendered source page, and the highlight enlarged beneath" width="100%">
+</p>
+
+**This is what "grounded" means here.** Not a page number in a citation — the
+rendered page with the supporting span boxed on it, and the same box enlarged
+below so it is legible without zooming. The backend returns the rectangle
+already converted to pixels of the image it also serves, so the overlay stays
+correct at any size. A quote that could not be located comes back with
+`grounded: false` and no box rather than a plausible guess.
+
+<p align="center">
+  <img src="docs/img/comparison-verdicts.png" alt="One fact with three relationships: two reconciled and one contradiction, each with a named axis and rationale" width="100%">
+</p>
+
+**A bare verdict is not actionable; the axis is.** One fact here carries
+**2 reconciled and 1 contradicts** at once — the two facts side by side, the
+three columns the decision turns on, and the model's rationale citing both.
+`DIFFERS BY TIME PERIOD` is the reconciling dimension the classifier had to
+name in its own field, which is what makes "apparent contradiction" a distinct
+answer rather than a hedge.
+
+<p align="center">
+  <img src="docs/img/landing-numbers.png" alt="Live corpus statistics: 335 facts, the verdict split, and evidence strength graded on every fact" width="100%">
+</p>
+
+**Read live from the same endpoint the app's own header uses**, so a number
+shown to a visitor can never disagree with what the app shows a minute later.
+Two things worth reading twice: **37 reconciled against 2 contradicts** — most
+apparent conflicts are not conflicts, which is the whole thesis stated as data
+— and the evidence bar, where only **129 of 335** facts carry proof strong
+enough to stand alone. That second number is uncomfortable, and it is on the
+front page rather than buried.
+
+---
+
 ## Layout
 
 ```

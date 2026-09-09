@@ -21,6 +21,7 @@ import logging
 import random
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -83,6 +84,21 @@ CURRENT_SIDES = (CURRENT_A, CURRENT_CANDIDATE)
 # the other four do not need: `fact_id_a` is always the CURRENT fact and
 # `fact_id_b` the one it replaced. Everything that reads the table can rely on
 # that, and _resolve_direction below is the single place that establishes it.
+
+
+@dataclass
+class _LinkJob:
+    """One fact and the candidates it needs judged against.
+
+    Built entirely from the database up front, so the classification step can
+    run on a worker thread without ever touching the connection.
+    """
+
+    fact_id: int
+    row_a: sqlite3.Row
+    candidate_rows: list[sqlite3.Row]
+    candidate_ids: list[int]
+    candidate_scores: list[float]
 
 
 @dataclass
@@ -642,13 +658,14 @@ def link_document_facts(
             total=len(facts),
         )
 
-    for position, fact in enumerate(facts, start=1):
-        if progress:
-            progress.update(
-                current=position,
-                message=f"classifying fact {position} of {len(facts)}",
-                relationships=summary.relationships_created,
-            )
+    # ---- phase 1: work out what needs judging. Pure reads, no model calls.
+    #
+    # Three phases so the model calls can run concurrently without SQLite ever
+    # being touched from a worker thread. Gathering candidates and writing
+    # verdicts both need the connection; only the classification between them
+    # is slow, and it is the only part that leaves this thread.
+    jobs: list[_LinkJob] = []
+    for fact in facts:
         stored = repo.get_embedding(conn, fact.id)
         if stored is None:
             continue
@@ -685,28 +702,71 @@ def link_document_facts(
 
         summary.facts_compared += 1
         summary.pairs_evaluated += len(candidate_rows)
+        jobs.append(
+            _LinkJob(fact.id, row_a, candidate_rows, candidate_ids, candidate_scores)
+        )
 
-        try:
-            verdicts = classify_candidates(row_a, candidate_rows)
-        except QuotaExhaustedError:
-            # Every remaining call would fail the same way. Stop and report
-            # what was linked rather than grinding through the rest.
-            logger.warning("daily quota exhausted; stopping linking early")
-            summary.errors += len(candidate_rows)
-            break
-        except ExtractionError as exc:
-            logger.warning("classification failed for fact %s: %s", fact.id, exc)
-            summary.errors += len(candidate_rows)
+    if not jobs:
+        return summary
+
+    # ---- phase 2: classify. One model call per fact, all of them at once.
+    #
+    # This used to be sequential, and it was the pipeline's real bottleneck.
+    # Extraction has been concurrent for a long time, so a document's facts
+    # came out quickly and then queued one round trip at a time to be linked --
+    # a two-fact upload spent roughly 25 seconds here, growing linearly with
+    # the number of facts that have candidates at all.
+    workers = max(1, min(len(jobs), settings.extraction_concurrency))
+    outcomes: dict[int, object] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="link") as executor:
+        futures = {
+            executor.submit(classify_candidates, job.row_a, job.candidate_rows): index
+            for index, job in enumerate(jobs)
+        }
+        finished = 0
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                outcomes[index] = future.result()
+            except Exception as exc:
+                # Carried rather than raised: one fact's classification failing
+                # must not cost the others their verdicts, and phase 3 needs to
+                # count it against the right fact.
+                outcomes[index] = exc
+            finished += 1
+            if progress:
+                progress.update(
+                    current=finished,
+                    message=f"classifying fact {finished} of {len(jobs)}",
+                    relationships=summary.relationships_created,
+                )
+
+    # ---- phase 3: write. Back on one thread, so the connection is safe again.
+    for index, job in enumerate(jobs):
+        outcome = outcomes.get(index)
+
+        if isinstance(outcome, QuotaExhaustedError):
+            # Every call was submitted before the first came back, so there is
+            # no longer anything to stop early -- the rest failed the same way.
+            logger.warning("daily quota exhausted while linking fact %s", job.fact_id)
+            summary.errors += len(job.candidate_rows)
+            continue
+        if isinstance(outcome, Exception):
+            logger.warning(
+                "classification failed for fact %s: %s", job.fact_id, outcome
+            )
+            summary.errors += len(job.candidate_rows)
             continue
 
-        for position, other_id in enumerate(candidate_ids):
+        verdicts = outcome or {}
+        for position, other_id in enumerate(job.candidate_ids):
             verdict = verdicts.get(position)
             if verdict is None:
                 # The model returned no verdict for this candidate. Skipping is
                 # safer than defaulting: guessing 'unrelated' would silently
                 # bury a pair, and guessing anything else would invent a claim.
                 logger.warning(
-                    "no verdict for fact %s vs %s", fact.id, other_id
+                    "no verdict for fact %s vs %s", job.fact_id, other_id
                 )
                 summary.errors += 1
                 continue
@@ -728,11 +788,11 @@ def link_document_facts(
 
             # Every other verdict is symmetric, so the pair goes in as it came.
             # SUPERSEDES has to be oriented: fact_id_a is the current fact.
-            id_a, id_b = fact.id, other_id
+            id_a, id_b = job.fact_id, other_id
             direction: Direction | None = None
             if kind == SUPERSEDES:
                 direction = resolve_direction(
-                    row_a, candidate_rows[position], verdict.get("current_fact")
+                    job.row_a, job.candidate_rows[position], verdict.get("current_fact")
                 )
                 if direction is None:
                     # Neither the classifier nor the dates could say which fact
@@ -740,12 +800,12 @@ def link_document_facts(
                     # invention, so this counts as a failed judgement.
                     logger.warning(
                         "supersedes with no resolvable direction: %s vs %s",
-                        fact.id, other_id,
+                        job.fact_id, other_id,
                     )
                     summary.errors += 1
                     continue
                 if direction.current == CURRENT_CANDIDATE:
-                    id_a, id_b = other_id, fact.id
+                    id_a, id_b = other_id, job.fact_id
                 if direction.disputed:
                     rationale = (
                         f"[direction corrected] The classifier named the other "
@@ -779,7 +839,7 @@ def link_document_facts(
                     )
             logger.info(
                 "fact %s -> %s : %s (cosine %.3f)",
-                id_a, id_b, kind, candidate_scores[position],
+                id_a, id_b, kind, job.candidate_scores[position],
             )
 
     return summary

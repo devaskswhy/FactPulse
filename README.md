@@ -32,6 +32,7 @@
 | **The uncomfortable number** | Only **129 of 335 facts** carry evidence strong enough to stand alone. The system grades that and shows it, rather than hiding it behind a green checkmark |
 | **Schema** | `fact_type` is free text. 179 types, **none predefined** — the model names each kind of fact when it first meets one |
 | **Cost to try it** | **Zero.** A fresh clone auto-loads the corpus with no model calls and no API key |
+| **The live instance** | Starts from the same seed and **grows** as PDFs are uploaded to it, so its counts run ahead of the figures here — which is the incremental-ingestion claim being true rather than a discrepancy |
 
 ---
 
@@ -138,7 +139,7 @@ never the key itself.
 cd backend && pytest
 ```
 
-**96 tests.** 91 run against a stubbed model — deterministic, no API key, no
+**99 tests.** 94 run against a stubbed model — deterministic, no API key, no
 network. Five exercise the live classifier on synthetic inputs, including the
 brief's own resigned-director case, and **skip cleanly** when no key is
 configured.
@@ -147,7 +148,7 @@ configured.
 
 ## Video Demo
 
-**[Demo video — link to be added]**
+**[▶ Watch the 3-minute demo](https://drive.google.com/drive/folders/1XOeB6qVWUqC2jMUp0G_ClXS66236wgqU?usp=drive_link)**
 
 A shot-by-shot script is in [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md), written
 against the exact fact IDs catalogued in

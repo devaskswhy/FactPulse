@@ -869,6 +869,51 @@ Profiled against `02-delhivery-annual-report-fy24-excerpt.pdf` -- 100 pages,
 Everything that is not a network call is already fast. The work went where the
 time is.
 
+### Linking was sequential, and that was the real bottleneck
+
+Extraction was made concurrent early. Linking was not, and the gap went
+unnoticed for a long time because the profile above says "minutes" for both
+and does not say *why*. A one-page, two-sentence PDF taking a full minute is
+what finally exposed it: two facts cannot possibly need a minute of model
+time, and they did not -- they needed two round trips taken one after the
+other.
+
+Linking now runs in three phases so only the slow part is parallel and SQLite
+is never touched from a worker thread:
+
+| Phase | What it does | Connection |
+| --- | --- | --- |
+| 1. gather | read embeddings, score candidates, fetch rows | yes |
+| 2. classify | one model call per fact, all in flight | **no** |
+| 3. write | verdicts, relationships, review rows | yes |
+
+Bounded by the same `EXTRACTION_CONCURRENCY` as extraction, so the two stages
+together cannot exceed what the free-tier rate limit tolerates. Measured on a
+6-fact document where every fact had candidates, against the 335-fact corpus:
+**14.9s end to end**, producing 21 relationships. The sequential version spent
+longer than that linking two facts.
+
+Two behaviour changes came with it. A failed classification is carried as a
+value rather than raised, so one fact's failure cannot cost the others their
+verdicts. And a quota exhaustion no longer stops the run early -- every call is
+submitted before the first returns, so there is nothing left to stop; it is
+counted and reported instead.
+
+### The floor is latency, not code
+
+What remains is not parallelisable. A two-fact upload costs three sequential
+round trips -- extract, embed, classify -- and no amount of concurrency
+removes them. The same PDF, the same code, the same corpus:
+
+| Where | Time |
+| --- | --- |
+| Local machine | **11s** |
+| Deployed free tier (Railway, EU-West) | **69s** |
+
+Roughly five times slower per call on the hosted instance. Worth stating
+plainly, because it is easy to mistake for a defect in the pipeline when it is
+a property of where the pipeline is running.
+
 ### Parallel page parsing: measured and rejected
 
 The obvious first move is a thread pool over pages. It was implemented,

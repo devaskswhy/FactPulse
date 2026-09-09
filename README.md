@@ -210,7 +210,7 @@ All four suggested extensions, plus three the project added on its own.
 
 | Extension | How it is handled |
 |---|---|
-| **Large PDFs without performance issues** | Bounded concurrency, SSE progress, cached page renders. Measured **3.08×** on a 10-chunk burst — and honest that it is a burst figure, since sustained throughput is paced server-side ([§9](docs/ARCHITECTURE.md)) |
+| **Large PDFs without performance issues** | Extraction **and** linking are both bounded-concurrent, plus SSE progress and cached page renders. Linking was sequential until it was measured and fixed — see *Where the time actually goes* ([§9](docs/ARCHITECTURE.md)) |
 | **Many PDFs in one knowledge layer** | **All 53 relationships are cross-document.** The candidate pool loads once per ingest as one matrix, not once per fact ([§6](docs/ARCHITECTURE.md)) |
 | **A schema that evolves dynamically** | `fact_type` is free text + EAV. 137 types before one upload during development, **179 after** — gaining `waste-generation`, `air-emissions`, `emission-intensity` from pages nothing in the code anticipated ([§4](docs/ARCHITECTURE.md)) |
 | **New documents incrementally** | A new document is embedded and compared against the layer; **nothing already stored is re-extracted, re-embedded or re-judged** ([§8](docs/ARCHITECTURE.md)) |
@@ -475,11 +475,42 @@ rather than a full report — for ingesting something *new*. Nobody has to spend
 quota just to see the committed corpus populated; see "The offline demo seed"
 just below.
 
-Concurrency does not rescue this. Bounded concurrency measured **3.08×** on a
+Concurrency helps but does not rescue this. Extraction measured **3.08×** on a
 10-chunk burst (58.3s → 18.9s), but on a sustained 221-chunk run the per-chunk
 time drifted from 1.89s to 6.05s with no 429s returned — free-tier throughput
 appears to be paced server-side. The 3× figure is a burst result and should not
 be read as a whole-document one.
+
+### Where the time actually goes
+
+A one-page, two-sentence PDF took about a minute to ingest, which made no sense
+for a document that produces two facts. The cause was not the PDF and not
+extraction: **linking was a sequential loop**. Extraction had been concurrent
+for a long time, so a document's facts came out quickly and then queued to be
+compared against the corpus one model round trip at a time.
+
+Linking is now three phases — gather candidates (database), classify (all
+calls in flight together, no database), write verdicts (database) — so SQLite
+is never touched off the main thread and only the slow part is parallel. Same
+bounded pool as extraction, so the two stages together cannot exceed what the
+rate limit tolerates.
+
+| Document | Before | After |
+| --- | --- | --- |
+| 6 facts, all with candidates, against the 335-fact corpus | ~75s+ | **14.9s** end to end |
+
+**The remaining floor is network latency, not the code.** A two-fact upload
+still costs three sequential round trips — extract, embed, classify — and
+those are not parallelisable away. Measured on the same PDF:
+
+| Where | Time |
+| --- | --- |
+| Local machine | **11s** |
+| Deployed free tier (Railway, EU-West) | **69s** |
+
+Same code, same corpus. The hosted instance is roughly five times slower per
+call, which is worth knowing before judging the deployment rather than the
+system.
 
 ### The offline demo seed
 
@@ -559,6 +590,18 @@ the replacement seam is deliberately narrow.
   `chapter-start-page` are real extractions from front matter. Ingesting body
   page ranges avoids them; filtering them automatically would need a
   document-structure pass.
+- **`DELETE /documents/{id}` returns 500 on a document that has
+  relationships.** Found while clearing test uploads from the deployed
+  instance. Deleting a document with no links works; one whose facts have been
+  linked does not. Not diagnosed yet, and it is the reason the hosted corpus
+  still carries a few throwaway uploads.
+- **A linking failure is invisible in the upload response.** `ingest_pdf`
+  catches `EmbeddingError` so a linking failure cannot destroy facts already
+  extracted — correct in isolation, but it means a document can ingest, report
+  its facts, and silently produce zero relationships. That is exactly what a
+  misconfigured embedding model did on the deployed instance for three
+  uploads before anyone noticed. The response reports `facts_inserted`; it
+  should report that linking was attempted and failed.
 
 ---
 

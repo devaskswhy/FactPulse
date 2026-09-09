@@ -56,5 +56,3 @@ yarn-error.log*
 Thumbs.db
 desktop.ini
 
-# Sample PDF generated for the demo upload shot; not part of the corpus.
-demo-upload-sample.pdf
